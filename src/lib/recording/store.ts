@@ -1,0 +1,436 @@
+/**
+ * Active-run recording store (CLAUDE.md §12, plan §7.4).
+ *
+ * Owns the in-flight run: status, the live track, derived stats (distance, pace,
+ * per-km splits), and the client-generated `activityId`. Wires to the
+ * `LocationTracker` + `PointUploader` ADAPTERS (never `navigator.geolocation` /
+ * `fetch` directly).
+ *
+ * Lifecycle:
+ *  - `start()`  — generate a UUID activityId, acquire the wake lock + start GPS via
+ *    the LocationTracker adapter, subscribe to fixes → `addPoint`.
+ *  - `addPoint()` — drop low-accuracy fixes, append to `points` + the durable
+ *    PointUploader IndexedDB buffer, recompute distance / duration / pace / splits,
+ *    and (throttled, 2 s) emit a live current-position write — a GUARDED no-op
+ *    until Firebase RTDB lands (TODO(CP6); we only log today).
+ *  - `pause()` / `resume()` — bridge to the tracker; paused time is excluded from
+ *    `durationMs`.
+ *  - `stop()` — assemble the buffered track and POST `/api/activities` (upsert)
+ *    through the injected `useCreateActivity` submitter, returning `bestEfforts`,
+ *    then clear the IndexedDB buffer for the activity.
+ *
+ * Crash recovery (§7.4): `pendingCount()` reports buffered batches that survived a
+ * reload/crash; `recover()` reloads the most-recent unfinished activity's points
+ * back into the store so the Record screen can offer "resume / discard / save".
+ *
+ * The store is React-free (created outside the tree), so the network POST is
+ * provided by a bridge hook (`useRecordingSubmit` in `submit.ts`) that registers
+ * the `useCreateActivity` mutation via `setSubmitActivity` — screens never wire the
+ * apiClient here.
+ */
+import { create } from "zustand";
+import { v4 as uuidv4 } from "uuid";
+import { getAdapters } from "@/adapters";
+import type { GeoPoint } from "@/adapters/types";
+import { getAllBatches } from "@/lib/db/pointBuffer";
+import type {
+  ActivityPointRequestDto,
+  ActivityResponseDto,
+  BestEffortResponseDto,
+} from "@/lib/api/types";
+
+export type RecordingStatus =
+  | "idle"
+  | "acquiring"
+  | "recording"
+  | "paused"
+  | "saving";
+
+export type ActivityType = "RUN" | "JOG" | "WALK";
+
+export interface Split {
+  /** 1-based km index */
+  km: number;
+  /** seconds elapsed within this km */
+  durationS: number;
+  /** seconds per km for this split */
+  paceSPerKm: number;
+}
+
+export interface RecordingStats {
+  /** meters */
+  distanceM: number;
+  /** ms of active (non-paused) time */
+  durationMs: number;
+  /** seconds per km (rolling average), or null until enough distance accrues */
+  paceSPerKm: number | null;
+  /** completed per-km splits */
+  splits: Split[];
+}
+
+/**
+ * Submitter the bridge hook injects — the `useCreateActivity` mutation's
+ * `mutateAsync`, but typed to the request/response shapes the store needs.
+ */
+export type SubmitActivity = (body: {
+  id: string;
+  title: string;
+  type: ActivityType;
+  routeId?: string | null;
+  startedAt: number;
+  endedAt: number;
+  durationMs: number;
+  distanceMeters?: number;
+  elevation: { gainMeters: number };
+  points: ActivityPointRequestDto[];
+}) => Promise<ActivityResponseDto>;
+
+interface RecordingState {
+  status: RecordingStatus;
+  activityId: string | null;
+  routeId: string | null;
+  /** the activity title to save (Record screen edits before/at Stop) */
+  title: string;
+  type: ActivityType;
+  points: GeoPoint[];
+  stats: RecordingStats;
+  /** wall-clock start (epoch ms) */
+  startedAt: number | null;
+  /** accumulated active time at the last pause (ms) — duration baseline */
+  accumulatedMs: number;
+  /** epoch ms of the last resume/start; null while paused */
+  segmentStartedAt: number | null;
+  /** result of the last successful Stop */
+  lastBestEfforts: BestEffortResponseDto[] | null;
+
+  setTitle(title: string): void;
+  setType(type: ActivityType): void;
+  start(opts?: { routeId?: string | null; title?: string; type?: ActivityType }): Promise<void>;
+  addPoint(p: GeoPoint): void;
+  pause(): void;
+  resume(): void;
+  stop(): Promise<ActivityResponseDto | null>;
+  reset(): void;
+
+  /** crash-recovery: number of buffered batches still on disk */
+  pendingCount(): Promise<number>;
+  /** crash-recovery: reload the most-recent unfinished activity into the store */
+  recover(): Promise<boolean>;
+}
+
+const EMPTY_STATS: RecordingStats = {
+  distanceM: 0,
+  durationMs: 0,
+  paceSPerKm: null,
+  splits: [],
+};
+
+/** Drop fixes worse than this horizontal accuracy (meters). */
+const MAX_ACCURACY_M = 30;
+/** Min interval between live current-position writes (ms). */
+const LIVE_THROTTLE_MS = 2000;
+
+function haversineM(a: GeoPoint, b: GeoPoint): number {
+  const R = 6371000;
+  const toRad = (d: number) => (d * Math.PI) / 180;
+  const dLat = toRad(b.lat - a.lat);
+  const dLng = toRad(b.lng - a.lng);
+  const h =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(a.lat)) * Math.cos(toRad(b.lat)) * Math.sin(dLng / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(h));
+}
+
+/** Adapter GeoPoint → wire ActivityPointRequestDto ({lat,lng,ts,ele?,accuracy?}). */
+function toWirePoint(p: GeoPoint): ActivityPointRequestDto {
+  return {
+    lat: p.lat,
+    lng: p.lng,
+    ts: p.timestamp,
+    ...(p.altitude != null ? { ele: p.altitude } : {}),
+    ...(p.accuracy != null ? { accuracy: p.accuracy } : {}),
+  };
+}
+
+/** Recompute completed per-km splits from the full point list. */
+function computeSplits(points: GeoPoint[]): Split[] {
+  if (points.length < 2) return [];
+  const splits: Split[] = [];
+  let cumDist = 0;
+  let kmIndex = 1;
+  let kmStartTs = points[0].timestamp;
+  for (let i = 1; i < points.length; i++) {
+    cumDist += haversineM(points[i - 1], points[i]);
+    while (cumDist >= kmIndex * 1000) {
+      const durationS = (points[i].timestamp - kmStartTs) / 1000;
+      splits.push({ km: kmIndex, durationS, paceSPerKm: durationS });
+      kmStartTs = points[i].timestamp;
+      kmIndex += 1;
+    }
+  }
+  return splits;
+}
+
+/** ms of active (non-paused) recording time for the current state. */
+function activeDurationMs(s: {
+  accumulatedMs: number;
+  segmentStartedAt: number | null;
+}): number {
+  return s.accumulatedMs + (s.segmentStartedAt ? Date.now() - s.segmentStartedAt : 0);
+}
+
+// --- live-write injection (CP6) -------------------------------------------
+let lastLiveWriteAt = 0;
+/**
+ * Throttled current-position live write. GUARDED no-op until Firebase RTDB lands:
+ * a CP6 bridge will register the real writer via `setLiveWriter`. Today we log.
+ */
+let liveWriter: ((routeId: string, p: GeoPoint) => void) | null = null;
+export function setLiveWriter(fn: ((routeId: string, p: GeoPoint) => void) | null): void {
+  liveWriter = fn;
+}
+function maybeLiveWrite(routeId: string | null, p: GeoPoint): void {
+  if (!routeId) return;
+  const now = Date.now();
+  if (now - lastLiveWriteAt < LIVE_THROTTLE_MS) return;
+  lastLiveWriteAt = now;
+  if (liveWriter) {
+    liveWriter(routeId, p);
+  } else if (import.meta.env.DEV) {
+    // TODO(CP6): write liveSessions/<routeId>/<uid> via the firebase SDK.
+    console.debug("[recording] live position (stubbed, no RTDB)", routeId, p.lat, p.lng);
+  }
+}
+
+// --- network-submit injection (set by the useRecordingSubmit bridge) -------
+let submitActivity: SubmitActivity | null = null;
+export function setSubmitActivity(fn: SubmitActivity | null): void {
+  submitActivity = fn;
+}
+
+let unsubscribePosition: (() => void) | null = null;
+
+export const useRecordingStore = create<RecordingState>((set, get) => ({
+  status: "idle",
+  activityId: null,
+  routeId: null,
+  title: "",
+  type: "RUN",
+  points: [],
+  stats: EMPTY_STATS,
+  startedAt: null,
+  accumulatedMs: 0,
+  segmentStartedAt: null,
+  lastBestEfforts: null,
+
+  setTitle: (title) => set({ title }),
+  setType: (type) => set({ type }),
+
+  async start(opts) {
+    const { location } = getAdapters();
+    const activityId = uuidv4();
+    const now = Date.now();
+    lastLiveWriteAt = 0;
+    set({
+      status: "acquiring",
+      activityId,
+      routeId: opts?.routeId ?? null,
+      title: opts?.title ?? "",
+      type: opts?.type ?? "RUN",
+      points: [],
+      stats: EMPTY_STATS,
+      startedAt: now,
+      accumulatedMs: 0,
+      segmentStartedAt: now,
+      lastBestEfforts: null,
+    });
+
+    // Buffer each filtered fix to IndexedDB and update live state.
+    unsubscribePosition?.();
+    unsubscribePosition = location.onPosition((p) => {
+      get().addPoint(p);
+    });
+
+    // Each filtered fix is buffered to IndexedDB inside `addPoint`.
+    await location.start({ keepScreenOn: true, maxAccuracyM: MAX_ACCURACY_M });
+    set({ status: "recording" });
+  },
+
+  addPoint(p) {
+    // Drop low-accuracy fixes (the tracker also filters, but guard here too).
+    if (p.accuracy != null && p.accuracy > MAX_ACCURACY_M) return;
+
+    const state = get();
+    if (state.status === "paused") return;
+
+    const prev = state.points[state.points.length - 1];
+    const points = [...state.points, p];
+    const distanceM = state.stats.distanceM + (prev ? haversineM(prev, p) : 0);
+    const durationMs = activeDurationMs(state);
+    const paceSPerKm = distanceM > 0 ? durationMs / 1000 / (distanceM / 1000) : null;
+    const splits = computeSplits(points);
+
+    set({ points, stats: { distanceM, durationMs, paceSPerKm, splits } });
+
+    // Durable buffer (crash-safe) — never lose an in-progress run.
+    if (state.activityId) {
+      void getAdapters().uploader.enqueue(state.activityId, [p]);
+    }
+
+    // Throttled live current-position write (guarded no-op until CP6).
+    maybeLiveWrite(state.routeId, p);
+  },
+
+  pause() {
+    const state = get();
+    if (state.status !== "recording") return;
+    getAdapters().location.pause();
+    set({
+      status: "paused",
+      accumulatedMs: activeDurationMs(state),
+      segmentStartedAt: null,
+    });
+  },
+
+  resume() {
+    const state = get();
+    if (state.status !== "paused") return;
+    getAdapters().location.resume();
+    set({ status: "recording", segmentStartedAt: Date.now() });
+  },
+
+  async stop() {
+    const { location, uploader } = getAdapters();
+    const state = get();
+    const { activityId, points, routeId, title, type } = state;
+    set({ status: "saving" });
+
+    unsubscribePosition?.();
+    unsubscribePosition = null;
+    await location.stop();
+
+    const durationMs = activeDurationMs(state);
+    const startedAt = state.startedAt ?? Date.now();
+    const endedAt = startedAt + durationMs;
+
+    // Nothing recorded / no submitter wired — bail out cleanly.
+    if (!activityId || points.length === 0 || !submitActivity) {
+      set({ status: "idle" });
+      return null;
+    }
+
+    try {
+      const result = await submitActivity({
+        id: activityId,
+        title: title || defaultTitle(type),
+        type,
+        routeId: routeId ?? null,
+        startedAt,
+        endedAt,
+        durationMs,
+        distanceMeters: state.stats.distanceM,
+        elevation: { gainMeters: elevationGainM(points) },
+        points: points.map(toWirePoint),
+      });
+      // Server has the run — clear the durable buffer + the RTDB live node (CP6).
+      await uploader.clear(activityId);
+      set({
+        status: "idle",
+        lastBestEfforts: result.bestEfforts ?? null,
+      });
+      return result;
+    } catch (err) {
+      // Keep the buffer + state intact so the run is never lost; let the screen
+      // surface a retry. Return to a non-saving state.
+      set({ status: "idle" });
+      throw err;
+    }
+  },
+
+  reset() {
+    unsubscribePosition?.();
+    unsubscribePosition = null;
+    set({
+      status: "idle",
+      activityId: null,
+      routeId: null,
+      title: "",
+      type: "RUN",
+      points: [],
+      stats: EMPTY_STATS,
+      startedAt: null,
+      accumulatedMs: 0,
+      segmentStartedAt: null,
+      lastBestEfforts: null,
+    });
+  },
+
+  async pendingCount() {
+    return getAdapters().uploader.pendingCount();
+  },
+
+  async recover() {
+    const batches = await getAllBatches();
+    if (batches.length === 0) return false;
+
+    // Group buffered batches by activity, pick the most-recent one, replay points.
+    const byActivity = new Map<string, typeof batches>();
+    for (const b of batches) {
+      const list = byActivity.get(b.activityId) ?? [];
+      list.push(b);
+      byActivity.set(b.activityId, list);
+    }
+    let bestId: string | null = null;
+    let bestTs = -Infinity;
+    for (const [id, list] of byActivity) {
+      const maxTs = Math.max(...list.map((b) => b.createdAt));
+      if (maxTs > bestTs) {
+        bestTs = maxTs;
+        bestId = id;
+      }
+    }
+    if (!bestId) return false;
+
+    const list = (byActivity.get(bestId) ?? []).sort((a, b) => a.seq - b.seq);
+    const points: GeoPoint[] = list.flatMap((b) => b.points);
+    if (points.length === 0) return false;
+
+    let distanceM = 0;
+    for (let i = 1; i < points.length; i++) {
+      distanceM += haversineM(points[i - 1], points[i]);
+    }
+    const startedAt = points[0].timestamp;
+    const durationMs = points[points.length - 1].timestamp - startedAt;
+    const paceSPerKm = distanceM > 0 ? durationMs / 1000 / (distanceM / 1000) : null;
+
+    set({
+      status: "paused",
+      activityId: bestId,
+      points,
+      startedAt,
+      accumulatedMs: durationMs,
+      segmentStartedAt: null,
+      stats: { distanceM, durationMs, paceSPerKm, splits: computeSplits(points) },
+    });
+    return true;
+  },
+}));
+
+function defaultTitle(type: ActivityType): string {
+  const label = type === "RUN" ? "Run" : type === "JOG" ? "Jog" : "Walk";
+  const h = new Date().getHours();
+  const part = h < 12 ? "Morning" : h < 18 ? "Afternoon" : "Evening";
+  return `${part} ${label}`;
+}
+
+/** Cumulative positive elevation gain (meters) from point altitudes. */
+function elevationGainM(points: GeoPoint[]): number {
+  let gain = 0;
+  let prevEle: number | null = null;
+  for (const p of points) {
+    if (p.altitude == null) continue;
+    if (prevEle != null && p.altitude > prevEle) gain += p.altitude - prevEle;
+    prevEle = p.altitude;
+  }
+  return gain;
+}
