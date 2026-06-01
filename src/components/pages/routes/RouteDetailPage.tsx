@@ -9,13 +9,14 @@
  * "running now" pill (-> /routes/:id/live). "Start run on this route" navigates
  * to /record?routeId=:id.
  */
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import { Avatar, Btn, Card, IconBtn, Row, Spinner, Tag } from "@/components/primitives";
+import { Avatar, Btn, Card, Field, IconBtn, Row, Segmented, Spinner, Tag } from "@/components/primitives";
 import { SectionHead, StatusPill, Empty } from "@/components/chrome";
+import { BaseSheet, ActionMenu } from "@/components/sheets";
 import { MapView } from "@/components/map/MapView";
-import { useRoute, useRouteLeaderboard } from "@/lib/api/routes";
-import { useRouteMembers } from "@/lib/api/memberships";
+import { useRoute, useRouteLeaderboard, useUpdateRoute, useDeleteRoute } from "@/lib/api/routes";
+import { useRouteMembers, useInviteMember } from "@/lib/api/memberships";
 import { useLiveParticipants } from "@/lib/api/live";
 import { useAuth } from "@/lib/auth/AuthProvider";
 import { useUnits } from "@/lib/prefs/store";
@@ -46,7 +47,73 @@ export function RouteDetailPage() {
   const membersQ = useRouteMembers(id);
   const liveQ = useLiveParticipants(id);
 
+  const updateRoute = useUpdateRoute();
+  const deleteRoute = useDeleteRoute();
+  const inviteMember = useInviteMember(id ?? "");
+
   const route = routeQ.data;
+  const isOwner = !!user && !!route && route.ownerId === user.uid;
+
+  // 'more' kebab menu + the sheets it opens.
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [editOpen, setEditOpen] = useState(false);
+  const [deleteOpen, setDeleteOpen] = useState(false);
+  const [inviteOpen, setInviteOpen] = useState(false);
+
+  // Edit form state.
+  const [editName, setEditName] = useState("");
+  const [editDesc, setEditDesc] = useState("");
+  const [editVis, setEditVis] = useState<"private" | "invite" | "public">("private");
+
+  // Invite-by-email form state.
+  const [inviteEmail, setInviteEmail] = useState("");
+  const validEmail = /.+@.+\..+/.test(inviteEmail);
+
+  const openEdit = () => {
+    if (!route) return;
+    setEditName(route.name);
+    setEditDesc(asText(route.description));
+    // RouteDetail only exposes `isPublic`; seed the selector from it.
+    setEditVis(route.isPublic ? "public" : "private");
+    setEditOpen(true);
+  };
+
+  const submitEdit = async () => {
+    if (!id || !editName.trim()) return;
+    try {
+      await updateRoute.mutateAsync({
+        params: { path: { id } },
+        body: { name: editName.trim(), description: editDesc, visibility: editVis },
+      });
+      setEditOpen(false);
+      void routeQ.refetch();
+    } catch {
+      /* error surfaced inside the sheet */
+    }
+  };
+
+  const confirmDelete = async () => {
+    if (!id) return;
+    try {
+      await deleteRoute.mutateAsync({ params: { path: { id } } });
+      setDeleteOpen(false);
+      nav("/routes");
+    } catch {
+      /* error surfaced inside the sheet */
+    }
+  };
+
+  const sendInvite = async () => {
+    if (!validEmail) return;
+    try {
+      await inviteMember.mutateAsync({ email: inviteEmail });
+      setInviteOpen(false);
+      setInviteEmail("");
+    } catch {
+      /* error surfaced inside the sheet */
+    }
+  };
+
   const coords = lineCoords(route?.geometry);
   const distKm = (route?.distanceM ?? 0) / 1000;
   const segmentDistanceM = route?.segments?.[0]?.distanceM ?? route?.distanceM ?? 0;
@@ -167,12 +234,25 @@ export function RouteDetailPage() {
               }}
               style={{ background: "rgba(0,0,0,.45)", backdropFilter: "blur(8px)", color: "#fff" }}
             />
-            <IconBtn
-              name="more"
-              onClick={() => nav("/routes/" + route.id + "/members")}
-              style={{ background: "rgba(0,0,0,.45)", backdropFilter: "blur(8px)", color: "#fff" }}
-            />
+            {isOwner && (
+              <IconBtn
+                name="more"
+                onClick={() => setMenuOpen((o) => !o)}
+                style={{ background: "rgba(0,0,0,.45)", backdropFilter: "blur(8px)", color: "#fff" }}
+              />
+            )}
           </div>
+          {isOwner && (
+            <ActionMenu
+              open={menuOpen}
+              onOpenChange={setMenuOpen}
+              anchor={{ top: 52, right: 0 }}
+              items={[
+                { label: "Edit route", icon: "edit", onSelect: openEdit },
+                { label: "Delete route", icon: "trash", tone: "danger", onSelect: () => setDeleteOpen(true) },
+              ]}
+            />
+          )}
         </div>
         {liveCount > 0 && (
           <button
@@ -301,14 +381,18 @@ export function RouteDetailPage() {
                   </span>
                 )}
               </div>
-              <Btn
-                size="sm"
-                variant="secondary"
-                icon="plus"
-                onClick={() => nav("/routes/" + route.id + "/members")}
-              >
-                Invite
-              </Btn>
+              {/* stopPropagation so tapping Invite opens the sheet without also
+                  triggering the parent Card's navigation to the Members page. */}
+              <div onClick={(e) => e.stopPropagation()}>
+                <Btn
+                  size="sm"
+                  variant="secondary"
+                  icon="plus"
+                  onClick={() => setInviteOpen(true)}
+                >
+                  Invite
+                </Btn>
+              </div>
             </Row>
           </Card>
         </div>
@@ -330,6 +414,106 @@ export function RouteDetailPage() {
           Start run on this route
         </Btn>
       </div>
+
+      {/* Edit route (owner) */}
+      <BaseSheet open={editOpen} onOpenChange={setEditOpen} title="Edit route">
+        <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+          <Field
+            label="Route name"
+            value={editName}
+            onChange={setEditName}
+            placeholder="Riverside loop"
+            icon="route"
+            autoFocus
+          />
+          <Field
+            label="Description"
+            value={editDesc}
+            onChange={setEditDesc}
+            placeholder="Flat 5k along the river path."
+            icon="edit"
+          />
+          <div>
+            <div style={{ fontSize: 12.5, fontWeight: 600, color: "var(--text-2)", marginBottom: 7 }}>
+              Visibility
+            </div>
+            <Segmented
+              value={editVis}
+              onChange={(v) => setEditVis(v as "private" | "invite" | "public")}
+              options={[
+                { value: "private", label: "Private" },
+                { value: "invite", label: "Invite" },
+                { value: "public", label: "Public" },
+              ]}
+            />
+          </div>
+          {updateRoute.isError && (
+            <div style={{ fontSize: 12.5, color: "var(--danger)", fontWeight: 600 }}>
+              {updateRoute.error?.message ?? "Couldn't save changes."}
+            </div>
+          )}
+          <Btn
+            full
+            size="lg"
+            disabled={!editName.trim()}
+            loading={updateRoute.isPending}
+            onClick={submitEdit}
+          >
+            Save changes
+          </Btn>
+        </div>
+      </BaseSheet>
+
+      {/* Delete confirm (owner) */}
+      <BaseSheet open={deleteOpen} onOpenChange={setDeleteOpen} title="Delete route?">
+        <p style={{ color: "var(--text-2)", fontSize: 14, lineHeight: 1.5 }}>
+          This permanently deletes “{route.name}”, its members, and all recorded times. This can't be
+          undone.
+        </p>
+        {deleteRoute.isError && (
+          <div style={{ fontSize: 12.5, color: "var(--danger)", marginTop: 10, fontWeight: 600 }}>
+            {deleteRoute.error?.message ?? "Couldn't delete route."}
+          </div>
+        )}
+        <div style={{ display: "flex", flexDirection: "column", gap: 10, marginTop: 18 }}>
+          <Btn
+            full
+            size="lg"
+            variant="danger"
+            icon="trash"
+            loading={deleteRoute.isPending}
+            onClick={confirmDelete}
+          >
+            Delete route
+          </Btn>
+          <Btn full size="lg" variant="ghost" onClick={() => setDeleteOpen(false)}>
+            Cancel
+          </Btn>
+        </div>
+      </BaseSheet>
+
+      {/* Invite by email (mirrors RouteMembersPage) */}
+      <BaseSheet open={inviteOpen} onOpenChange={setInviteOpen} title="Invite by email">
+        <Field
+          label="Email address"
+          value={inviteEmail}
+          onChange={setInviteEmail}
+          placeholder="friend@email.com"
+          icon="mail"
+          inputMode="email"
+          autoFocus
+        />
+        {inviteMember.isError && (
+          <div style={{ fontSize: 12.5, color: "var(--danger)", marginTop: 10, fontWeight: 600 }}>
+            {inviteMember.error?.message ?? "Couldn't send invite."}
+          </div>
+        )}
+        <div style={{ marginTop: 16 }}>
+          <Btn full size="lg" disabled={!validEmail} loading={inviteMember.isPending} onClick={sendInvite}>
+            Send invite
+          </Btn>
+        </div>
+      </BaseSheet>
     </div>
   );
 }

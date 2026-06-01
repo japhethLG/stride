@@ -16,16 +16,29 @@
  */
 import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Btn, Field, Icon, IconBtn, Row, Toggle } from "@/components/primitives";
+import type { Map as MapLibreMap } from "maplibre-gl";
+import { Btn, Field, Icon, IconBtn, Row, Segmented, Spinner, Toggle } from "@/components/primitives";
 import { MapView } from "@/components/map/MapView";
 import { useSnapRoute } from "@/lib/api/routing";
 import { useCreateRoute } from "@/lib/api/routes";
 import { useUnits } from "@/lib/prefs/store";
 import { fmtKm, distUnit } from "@/lib/format";
+import { getAdapters } from "@/adapters";
+import { DEFAULT_CENTER, DEFAULT_ZOOM } from "@/lib/map/style";
 import type { CreateRouteRequestDto, RouteResponseDto } from "@/lib/api/types";
 import { ElevationChart, lineCoords } from "./_shared";
 
 type LngLat = [number, number];
+
+/** Routing profiles GraphHopper is configured to serve (foot is the run default). */
+type RouteProfile = "foot" | "bike" | "car";
+const PROFILE_OPTIONS = [
+  { value: "foot", label: "Foot" },
+  { value: "bike", label: "Bike" },
+  { value: "car", label: "Car" },
+];
+/** Zoom the camera flies to when locating the user. */
+const LOCATE_ZOOM = 15;
 
 /** Haversine distance (m) for a polyline of [lng,lat] points. */
 function haversineMeters(coords: LngLat[]): number {
@@ -51,9 +64,19 @@ export function CreateRoutePage() {
 
   const [pts, setPts] = useState<LngLat[]>([]);
   const [snap, setSnap] = useState(true);
+  const [profile, setProfile] = useState<RouteProfile>("foot");
   const [expanded, setExpanded] = useState(false);
   const [name, setName] = useState("");
   const [isPublic, setPublic] = useState(false);
+  // Initial camera; set from the user's location on mount (else the default).
+  const [center, setCenter] = useState<[number, number]>(DEFAULT_CENTER);
+  const [locateError, setLocateError] = useState(false);
+  const [locating, setLocating] = useState(false);
+  // Measured bottom-panel height, so the locate button always sits above it.
+  const [panelH, setPanelH] = useState(230);
+  const panelRef = useRef<HTMLDivElement>(null);
+  // If geolocation resolves before the map is ready, recenter once onReady fires.
+  const pendingCenterRef = useRef<[number, number] | null>(null);
 
   // Snapped geometry (when snap is on and the server returned a road-snapped path).
   const [snapped, setSnapped] = useState<{ coords: LngLat[]; distanceM: number } | null>(null);
@@ -61,7 +84,60 @@ export function CreateRoutePage() {
   const snapRoute = useSnapRoute();
   const createRoute = useCreateRoute();
 
-  // Re-snap whenever the waypoints change and snap is enabled (≥2 points).
+  // Live MapLibre instance (from MapView.onReady) for flyTo on locate-me.
+  const mapRef = useRef<MapLibreMap | null>(null);
+
+  // Fly to a position now (map ready) or defer until onReady fires.
+  const flyToUser = (at: [number, number]) => {
+    if (mapRef.current) mapRef.current.flyTo({ center: at, zoom: LOCATE_ZOOM });
+    else pendingCenterRef.current = at;
+  };
+
+  // Shared one-shot locate (auto-focus on mount + the locate-me button), with a
+  // visible "locating" indicator while the GPS fix is in flight.
+  const locate = (cancelledRef?: { v: boolean }) => {
+    setLocating(true);
+    void getAdapters()
+      .location.getCurrentPosition()
+      .then((p) => {
+        if (cancelledRef?.v) return;
+        setLocating(false);
+        if (!p) {
+          setLocateError(true);
+          return;
+        }
+        const at: [number, number] = [p.lng, p.lat];
+        setCenter(at);
+        setLocateError(false);
+        flyToUser(at);
+      });
+  };
+
+  // --- auto-focus on the user's location on mount ---
+  useEffect(() => {
+    const c = { v: false };
+    locate(c);
+    return () => {
+      c.v = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const locateMe = () => locate();
+
+  // --- keep the locate button above the (variable-height) bottom panel ---
+  useEffect(() => {
+    const el = panelRef.current;
+    if (!el) return;
+    setPanelH(el.offsetHeight);
+    const ro = new ResizeObserver((entries) => {
+      for (const e of entries) setPanelH(e.contentRect.height);
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  // Re-snap whenever the waypoints/profile change and snap is enabled (≥2 points).
   const reqIdRef = useRef(0);
   useEffect(() => {
     if (!snap || pts.length < 2) {
@@ -70,7 +146,7 @@ export function CreateRoutePage() {
     }
     const reqId = ++reqIdRef.current;
     snapRoute.mutate(
-      { body: { points: pts.map(([lng, lat]) => ({ lat, lng })) } },
+      { body: { points: pts.map(([lng, lat]) => ({ lat, lng })), profile } },
       {
         onSuccess: (data) => {
           if (reqId !== reqIdRef.current) return; // stale response
@@ -88,7 +164,7 @@ export function CreateRoutePage() {
       },
     );
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pts, snap]);
+  }, [pts, snap, profile]);
 
   // The geometry we draw + save: snapped path when available, else raw waypoints.
   const drawCoords: LngLat[] = snap && snapped ? snapped.coords : pts;
@@ -124,6 +200,15 @@ export function CreateRoutePage() {
       {/* map canvas (real MapLibre, draw mode) */}
       <div style={{ position: "absolute", inset: 0 }}>
         <MapView
+          center={center}
+          zoom={DEFAULT_ZOOM}
+          onReady={(map) => {
+            mapRef.current = map;
+            if (pendingCenterRef.current) {
+              map.flyTo({ center: pendingCenterRef.current, zoom: LOCATE_ZOOM });
+              pendingCenterRef.current = null;
+            }
+          }}
           onMapClick={addPoint}
           drawCoords={drawCoords}
           markers={
@@ -224,8 +309,112 @@ export function CreateRoutePage() {
         </div>
       )}
 
+      {/* locate-me — sits just above the bottom panel; spinner while locating */}
+      <div
+        style={{
+          position: "absolute",
+          right: 14,
+          bottom: panelH + 14,
+          zIndex: 30,
+          transition: "bottom .2s var(--ease-out)",
+        }}
+      >
+        {locating ? (
+          <div
+            style={{
+              width: 46,
+              height: 46,
+              borderRadius: "50%",
+              background: "var(--surface)",
+              border: "1px solid var(--border)",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              boxShadow: "var(--shadow)",
+            }}
+          >
+            <Spinner size={20} color="var(--accent)" />
+          </div>
+        ) : (
+          <IconBtn
+            name="locate"
+            size={46}
+            iconSize={22}
+            onClick={locateMe}
+            style={{
+              background: "var(--surface)",
+              border: "1px solid var(--border)",
+              boxShadow: "var(--shadow)",
+            }}
+          />
+        )}
+      </div>
+
+      {locating && (
+        <div
+          style={{
+            position: "absolute",
+            top: 60,
+            left: 0,
+            right: 0,
+            textAlign: "center",
+            zIndex: 6,
+            pointerEvents: "none",
+          }}
+        >
+          <div
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 7,
+              background: "rgba(0,0,0,.5)",
+              backdropFilter: "blur(8px)",
+              padding: "7px 13px",
+              borderRadius: "var(--r-pill)",
+              color: "#fff",
+              fontWeight: 600,
+              fontSize: 12,
+            }}
+          >
+            <Spinner size={13} color="#fff" /> Locating you…
+          </div>
+        </div>
+      )}
+
+      {locateError && !locating && pts.length === 0 && (
+        <div
+          style={{
+            position: "absolute",
+            top: 60,
+            left: 0,
+            right: 0,
+            textAlign: "center",
+            zIndex: 6,
+            pointerEvents: "none",
+          }}
+        >
+          <div
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 6,
+              background: "rgba(0,0,0,.5)",
+              backdropFilter: "blur(8px)",
+              padding: "7px 13px",
+              borderRadius: "var(--r-pill)",
+              color: "#fff",
+              fontWeight: 600,
+              fontSize: 12,
+            }}
+          >
+            <Icon name="info" size={14} /> Location unavailable — pan the map to start
+          </div>
+        </div>
+      )}
+
       {/* bottom sheet */}
       <div
+        ref={panelRef}
         style={{
           position: "absolute",
           left: 0,
@@ -276,6 +465,18 @@ export function CreateRoutePage() {
               {pts.length} point{pts.length !== 1 ? "s" : ""}
             </div>
           </Row>
+
+          {/* routing profile — re-snaps the geometry when changed */}
+          <div style={{ marginTop: 14 }}>
+            <div className="eyebrow" style={{ fontSize: 10, marginBottom: 6 }}>
+              Routing
+            </div>
+            <Segmented
+              options={PROFILE_OPTIONS}
+              value={profile}
+              onChange={(v) => setProfile(v as RouteProfile)}
+            />
+          </div>
 
           {expanded && (
             <div style={{ marginTop: 18 }}>

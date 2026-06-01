@@ -114,6 +114,27 @@ export class WebLocationTracker implements LocationTracker {
     });
   }
 
+  /**
+   * One-shot `navigator.geolocation.getCurrentPosition` wrapped in a Promise.
+   * High accuracy, sane timeout; resolves `null` (never rejects) on
+   * denial/unavailability so screens can fall back to a default center.
+   * TODO(Capacitor): NativeLocationTracker will use @capacitor/geolocation's
+   * getCurrentPosition (and its own permission flow) instead.
+   */
+  getCurrentPosition(): Promise<GeoPoint | null> {
+    return new Promise<GeoPoint | null>((resolve) => {
+      if (!("geolocation" in navigator)) {
+        resolve(null);
+        return;
+      }
+      navigator.geolocation.getCurrentPosition(
+        (pos) => resolve(toGeoPoint(pos)),
+        () => resolve(null),
+        { enableHighAccuracy: true, maximumAge: 30000, timeout: 15000 },
+      );
+    });
+  }
+
   private accept(p: GeoPoint): boolean {
     if (this.state === "paused") return false;
     const { maxAccuracyM, minIntervalMs, minDistanceM } = this.opts;

@@ -54,6 +54,13 @@ export interface LocationTrackerOptions {
 export interface LocationTracker {
   /** resolves on the first acceptable fix */
   start(opts?: LocationTrackerOptions): Promise<void>;
+  /**
+   * One-shot location read (does NOT start the tracking subscription). Used by
+   * non-recording screens (e.g. Create Route auto-focus / locate-me) that just
+   * need the user's current position. Resolves to `null` when permission is
+   * denied or no fix is available — callers fall back gracefully, never throw.
+   */
+  getCurrentPosition(): Promise<GeoPoint | null>;
   pause(): void;
   resume(): void;
   stop(): Promise<void>;

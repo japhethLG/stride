@@ -1,18 +1,16 @@
 /**
- * BaseSheet — the mobile bottom-sheet shell (CLAUDE.md §9), ported verbatim from
+ * BaseSheet — the mobile bottom-sheet shell (CLAUDE.md §9), ported from
  * design/project/stride-ui.jsx `Sheet`.
  *
- * Visuals are unchanged: scrim, rounded top, drag handle, optional title row with
- * a close button, and a scrollable body. Additions for the production sheet
- * system:
- *   - controlled via `open` + `onOpenChange(false)` (the §9 sheet host injects
- *     these; local callers pass them directly). The design's `onClose` maps to
- *     `onOpenChange(false)`.
- *   - optional `footer` slot pinned to the bottom with iOS safe-area padding
- *     (`env(safe-area-inset-bottom)`).
- *
- * This is the BASE shell only — concrete sheets wrap it (`<Name>Sheet.tsx`) and
- * register with the sheet registry/host in CP5.
+ * Controlled via `open` + `onOpenChange(false)`. The sheet is **only mounted
+ * when open** (`if (!open) return null`) — this is what guarantees a closed
+ * sheet can never appear, on any platform. (An earlier version kept it mounted
+ * and hid it with `transform: translateY(110%)` inside a `position:absolute`
+ * wrapper; on Android Chrome the positioned-ancestor height chain collapsed, so
+ * the closed panels weren't anchored to the viewport bottom and showed through —
+ * every sheet on a page appeared "open". Mounting only when open + `position:
+ * fixed` (viewport-anchored) removes that whole failure mode.) The open
+ * animation runs on mount via the `strideSheetUp` / `strideScrimIn` keyframes.
  */
 import type { ReactNode } from "react";
 import { IconBtn } from "@/components/primitives";
@@ -29,26 +27,21 @@ export interface BaseSheetProps {
 }
 
 export function BaseSheet({ open, onOpenChange, children, title, height, footer }: BaseSheetProps) {
+  if (!open) return null;
   const close = () => onOpenChange(false);
   return (
-    <div
-      style={{
-        position: "absolute",
-        inset: 0,
-        zIndex: 60,
-        pointerEvents: open ? "auto" : "none",
-      }}
-    >
+    <div style={{ position: "fixed", inset: 0, zIndex: 60 }}>
+      {/* scrim */}
       <div
         onClick={close}
         style={{
           position: "absolute",
           inset: 0,
           background: "rgba(0,0,0,.55)",
-          opacity: open ? 1 : 0,
-          transition: "opacity var(--dur)",
+          animation: "strideScrimIn .2s var(--ease-out)",
         }}
       />
+      {/* panel */}
       <div
         role="dialog"
         aria-modal="true"
@@ -62,11 +55,10 @@ export function BaseSheet({ open, onOpenChange, children, title, height, footer 
           background: "var(--surface)",
           borderRadius: "24px 24px 0 0",
           border: "1px solid var(--border)",
-          transform: open ? "translateY(0)" : "translateY(110%)",
-          transition: "transform .34s var(--ease-out)",
           display: "flex",
           flexDirection: "column",
           overflow: "hidden",
+          animation: "strideSheetUp .3s var(--ease-out)",
         }}
       >
         <div style={{ padding: "12px 0 4px", display: "flex", justifyContent: "center" }}>

@@ -3,3 +3,4 @@
  * sheets (CP5) wrap `BaseSheet` and register with the sheet host.
  */
 export { BaseSheet, type BaseSheetProps } from "./BaseSheet";
+export { ActionMenu, type ActionMenuProps, type ActionMenuItem } from "./ActionMenu";
