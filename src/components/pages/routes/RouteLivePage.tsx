@@ -19,7 +19,7 @@ import { Avatar, Btn, IconBtn, Row, Spinner, Tag } from "@/components/primitives
 import { StatusPill, Empty, Metric } from "@/components/chrome";
 import { MapView } from "@/components/map/MapView";
 import { useRoute } from "@/lib/api/routes";
-import { useLiveSession, useLiveParticipants } from "@/lib/api/live";
+import { useLiveSession, useLiveParticipants, useLiveRunners } from "@/lib/api/live";
 import { useUnits } from "@/lib/prefs/store";
 import { fmtKm, distUnit, fmtTime, fmtPace } from "@/lib/format";
 import { lineCoords, asText, asNum, msStringToSeconds, paceSPerKm } from "../record/_shared";
@@ -54,17 +54,24 @@ export function RouteLivePage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
 
+  // Live roster: subscribe to RTDB directly when Firebase is configured;
+  // otherwise fall back to the REST participants read (empty/dev-stub path).
+  const rtdb = useLiveRunners(id);
   const participantsQ = useLiveParticipants(id);
-  const participants = participantsQ.data?.participants ?? [];
+  const participants = rtdb.enabled
+    ? rtdb.runners
+    : participantsQ.data?.participants ?? [];
   const runners = useMemo(
     () =>
       [...participants].sort((a, b) => {
-        // sort online-first; positions aren't available pre-CP6 so this is stable
-        return Number(b.online) - Number(a.online);
+        // online-first, then most-recently-seen
+        if (Number(b.online) !== Number(a.online)) return Number(b.online) - Number(a.online);
+        return (b.lastSeen ?? 0) - (a.lastSeen ?? 0);
       }),
     [participants],
   );
   const onlineCount = runners.filter((r) => r.online).length;
+  const liveEnabled = rtdb.enabled || participantsQ.data?.enabled === true;
 
   // Runner markers — empty until CP6 (no RTDB positions).
   const runnerMarkers = runners
@@ -227,7 +234,7 @@ export function RouteLivePage() {
           </Tag>
         </div>
         <div style={{ overflow: "auto", padding: "0 20px", flex: 1 }}>
-          {participantsQ.isLoading ? (
+          {!rtdb.enabled && participantsQ.isLoading ? (
             <div style={{ display: "flex", justifyContent: "center", padding: "22px 0" }}>
               <Spinner color="var(--accent)" />
             </div>
@@ -236,9 +243,9 @@ export function RouteLivePage() {
               icon="signal"
               title="No one running right now"
               sub={
-                participantsQ.data?.enabled === false
-                  ? "Live tracking isn't available yet — be the first to start a run on this route."
-                  : "Be the first to start a run on this route."
+                liveEnabled
+                  ? "Be the first to start a run on this route."
+                  : "Live tracking isn't available yet — be the first to start a run on this route."
               }
             />
           ) : (

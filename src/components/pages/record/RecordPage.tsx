@@ -24,7 +24,8 @@ import { StatusPill } from "@/components/chrome";
 import { BaseSheet } from "@/components/sheets/BaseSheet";
 import { MapView } from "@/components/map/MapView";
 import { useRoute } from "@/lib/api/routes";
-import { useLiveParticipants } from "@/lib/api/live";
+import { useLiveRunners } from "@/lib/api/live";
+import { useAuth } from "@/lib/auth/AuthProvider";
 import { useRecordingStore } from "@/lib/recording/store";
 import { useRecordingSubmit } from "@/lib/recording/submit";
 import { useUnits } from "@/lib/prefs/store";
@@ -44,12 +45,17 @@ export function RecordPage() {
   const route = routeQ.data;
   const routeCoords = lineCoords(route?.geometry);
 
-  // TODO(CP6): other-runners overlay — Firebase RTDB is not configured, so this
-  // returns { enabled:false, participants:[] }. We read it for structure only;
-  // no live markers render until CP6 wires RTDB positions.
-  const liveQ = useLiveParticipants(routeId);
-  const otherRunners = (liveQ.data?.participants ?? []).filter(
-    (p) => typeof p.lat === "number" && typeof p.lng === "number",
+  // Other-runners overlay (CP6): subscribe to RTDB for everyone live on this
+  // route, excluding myself, keeping only runners with a known position. No-op
+  // (empty) when Firebase is unconfigured or this is a free run (no routeId).
+  const { user } = useAuth();
+  const liveRt = useLiveRunners(routeId);
+  const otherRunners = liveRt.runners.filter(
+    (p) =>
+      p.userId !== user?.uid &&
+      p.online &&
+      typeof p.lat === "number" &&
+      typeof p.lng === "number",
   );
 
   // --- recording store (source of truth) ---
@@ -128,7 +134,7 @@ export function RecordPage() {
 
   const markers = [
     ...(start ? [{ lng: start[0], lat: start[1], type: "start" as const }] : []),
-    // TODO(CP6): render other-runner markers from RTDB. Empty today.
+    // Other-runner markers from RTDB (online runners on this route, not me).
     ...otherRunners.map((p) => ({
       lng: p.lng as number,
       lat: p.lat as number,

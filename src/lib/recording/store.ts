@@ -181,25 +181,44 @@ function activeDurationMs(s: {
 
 // --- live-write injection (CP6) -------------------------------------------
 let lastLiveWriteAt = 0;
+let liveThrottleMs = LIVE_THROTTLE_MS;
+
 /**
- * Throttled current-position live write. GUARDED no-op until Firebase RTDB lands:
- * a CP6 bridge will register the real writer via `setLiveWriter`. Today we log.
+ * The RTDB live session controller, injected by the `useRecordingSubmit` bridge
+ * (React-side). It joins the backend live session (POST .../live/session), then
+ * drives the RTDB writer (presence + throttled position overwrite). A GUARDED
+ * no-op when Firebase is not configured or the run has no route (free run) — the
+ * bridge simply never starts a session, so `write()` is a no-op.
+ */
+export interface LiveController {
+  /** Join + begin presence; returns the throttle (ms) or null when not live. */
+  start(routeId: string, activityId: string): Promise<number | null>;
+  write(p: GeoPoint): void;
+  setState(state: "running" | "paused"): void;
+  stop(): void;
+}
+
+let liveController: LiveController | null = null;
+export function setLiveController(fn: LiveController | null): void {
+  liveController = fn;
+}
+
+/**
+ * Legacy single-fn live-writer hook (kept for back-compat / tests). Prefer
+ * `setLiveController`. When set, it receives every throttled fix.
  */
 let liveWriter: ((routeId: string, p: GeoPoint) => void) | null = null;
 export function setLiveWriter(fn: ((routeId: string, p: GeoPoint) => void) | null): void {
   liveWriter = fn;
 }
+
 function maybeLiveWrite(routeId: string | null, p: GeoPoint): void {
   if (!routeId) return;
   const now = Date.now();
-  if (now - lastLiveWriteAt < LIVE_THROTTLE_MS) return;
+  if (now - lastLiveWriteAt < liveThrottleMs) return;
   lastLiveWriteAt = now;
-  if (liveWriter) {
-    liveWriter(routeId, p);
-  } else if (import.meta.env.DEV) {
-    // TODO(CP6): write liveSessions/<routeId>/<uid> via the firebase SDK.
-    console.debug("[recording] live position (stubbed, no RTDB)", routeId, p.lat, p.lng);
-  }
+  if (liveController) liveController.write(p);
+  if (liveWriter) liveWriter(routeId, p);
 }
 
 // --- network-submit injection (set by the useRecordingSubmit bridge) -------
@@ -231,6 +250,7 @@ export const useRecordingStore = create<RecordingState>((set, get) => ({
     const activityId = uuidv4();
     const now = Date.now();
     lastLiveWriteAt = 0;
+    liveThrottleMs = LIVE_THROTTLE_MS;
     set({
       status: "acquiring",
       activityId,
@@ -254,6 +274,18 @@ export const useRecordingStore = create<RecordingState>((set, get) => ({
     // Each filtered fix is buffered to IndexedDB inside `addPoint`.
     await location.start({ keepScreenOn: true, maxAccuracyM: MAX_ACCURACY_M });
     set({ status: "recording" });
+
+    // Begin the RTDB live session (route runs only; free runs skip it). The
+    // bridge no-ops when Firebase is unconfigured or there's no routeId.
+    const routeId = opts?.routeId ?? null;
+    if (routeId && liveController) {
+      try {
+        const throttle = await liveController.start(routeId, activityId);
+        if (throttle && throttle > 0) liveThrottleMs = throttle;
+      } catch {
+        /* live is best-effort — never block recording on it */
+      }
+    }
   },
 
   addPoint(p) {
@@ -285,6 +317,7 @@ export const useRecordingStore = create<RecordingState>((set, get) => ({
     const state = get();
     if (state.status !== "recording") return;
     getAdapters().location.pause();
+    liveController?.setState("paused");
     set({
       status: "paused",
       accumulatedMs: activeDurationMs(state),
@@ -296,6 +329,7 @@ export const useRecordingStore = create<RecordingState>((set, get) => ({
     const state = get();
     if (state.status !== "paused") return;
     getAdapters().location.resume();
+    liveController?.setState("running");
     set({ status: "recording", segmentStartedAt: Date.now() });
   },
 
@@ -308,6 +342,8 @@ export const useRecordingStore = create<RecordingState>((set, get) => ({
     unsubscribePosition?.();
     unsubscribePosition = null;
     await location.stop();
+    // End the live session: delete the live node + set presence offline (CP6).
+    liveController?.stop();
 
     const durationMs = activeDurationMs(state);
     const startedAt = state.startedAt ?? Date.now();
@@ -332,7 +368,8 @@ export const useRecordingStore = create<RecordingState>((set, get) => ({
         elevation: { gainMeters: elevationGainM(points) },
         points: points.map(toWirePoint),
       });
-      // Server has the run — clear the durable buffer + the RTDB live node (CP6).
+      // Server has the run — clear the durable buffer (the RTDB live node was
+      // already removed by liveController.stop() above).
       await uploader.clear(activityId);
       set({
         status: "idle",
@@ -350,6 +387,7 @@ export const useRecordingStore = create<RecordingState>((set, get) => ({
   reset() {
     unsubscribePosition?.();
     unsubscribePosition = null;
+    liveController?.stop();
     set({
       status: "idle",
       activityId: null,
