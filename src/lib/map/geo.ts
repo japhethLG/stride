@@ -106,6 +106,52 @@ export function centerOf(coords: LngLat[]): LngLat | null {
   return [lng / coords.length, lat / coords.length];
 }
 
+/**
+ * Project a real line into a `"M x y L x y …"` SVG path string in the 0..100
+ * viewBox used by the static `MiniMap` thumbnail (no WebGL — cheap enough for
+ * long lists). Preserves the route's true shape: longitude is scaled by
+ * cos(latitude) so it isn't horizontally squashed, the bbox is fit *uniformly*
+ * (no distortion) and centered in the square box with padding, and Y is flipped
+ * for SVG's top-left origin. Returns `""` for fewer than 2 points so callers fall
+ * back to the faux thumbnail.
+ */
+export function coordsToThumbPath(input: LineInput, pad = 14): string {
+  const coords = toCoords(input);
+  if (coords.length < 2) return "";
+
+  // Aspect-correct: 1° lng is shorter than 1° lat by cos(lat).
+  const midLat =
+    (coords.reduce((sum, c) => sum + c[1], 0) / coords.length) * (Math.PI / 180);
+  const kx = Math.cos(midLat) || 1;
+  const pts = coords.map(([lng, lat]) => [lng * kx, lat] as LngLat);
+
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (const [x, y] of pts) {
+    if (x < minX) minX = x;
+    if (x > maxX) maxX = x;
+    if (y < minY) minY = y;
+    if (y > maxY) maxY = y;
+  }
+  const spanX = maxX - minX;
+  const spanY = maxY - minY;
+  const span = Math.max(spanX, spanY) || 1e-9; // uniform scale → no distortion
+  const inner = 100 - pad * 2;
+  const scale = inner / span;
+  const offX = pad + (inner - spanX * scale) / 2;
+  const offY = pad + (inner - spanY * scale) / 2;
+
+  return pts
+    .map(([x, y], i) => {
+      const px = offX + (x - minX) * scale;
+      const py = offY + (maxY - y) * scale; // flip Y
+      return `${i === 0 ? "M" : "L"}${px.toFixed(1)} ${py.toFixed(1)}`;
+    })
+    .join(" ");
+}
+
 /* ------------------------------------------------------------------ *
  * Demo-geometry bridge (NOT for production geometry).                *
  * ------------------------------------------------------------------ */

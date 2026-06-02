@@ -3,13 +3,18 @@
  * `CreateRouteScreen`.
  *
  * Real wiring (CLAUDE.md §5): the design's FauxMap tap-canvas is replaced with
- * the MapLibre `MapView`. Map clicks drop real `{lng,lat}` waypoints
- * (`onMapClick`); the in-progress line is drawn via `drawCoords`. The "Snap"
- * toggle calls `useSnapRoute` (POST /api/routing/snap) whenever the waypoints
- * change (≥2 points) to snap the polyline to roads — the snapped geometry +
- * distance are shown live. Save POSTs via `useCreateRoute` (GeoJSON LineString
- * geometry, visibility from the make-public toggle, elevation) then navigates to
- * the new /routes/:id.
+ * the MapLibre `MapView`. Drawing is **manual tap-to-draw** — map clicks drop
+ * real `{lng,lat}` waypoints (`onMapClick`); the in-progress line is drawn via
+ * `drawCoords` and an Undo control pops the last point. The map is mounted with
+ * `fit={false}` so dropping a point NEVER moves the camera (the user keeps their
+ * pan/zoom). Location comes from the shared `useUserLocation()` context (persisted
+ * last-known + auto-refresh), so the map opens near the user — not the default
+ * center — and a "me" marker shows where they are; locate-me re-centers. The
+ * "Snap" toggle calls `useSnapRoute` (POST /api/routing/snap) whenever the
+ * waypoints change (≥2 points) to snap the polyline to roads — the snapped
+ * geometry + distance are shown live. Save POSTs via `useCreateRoute` (GeoJSON
+ * LineString geometry, visibility from the make-public toggle, elevation) then
+ * navigates to the new /routes/:id.
  *
  * Elevation gain is left to the server to recompute (we have no client-side DEM),
  * so the profile chart renders a flat baseline until the route detail loads it.
@@ -23,8 +28,8 @@ import { useSnapRoute } from "@/lib/api/routing";
 import { useCreateRoute } from "@/lib/api/routes";
 import { useUnits } from "@/lib/prefs/store";
 import { fmtKm, distUnit } from "@/lib/format";
-import { getAdapters } from "@/adapters";
-import { DEFAULT_CENTER, DEFAULT_ZOOM } from "@/lib/map/style";
+import { useUserLocation } from "@/lib/location/UserLocationProvider";
+import { DEFAULT_ZOOM } from "@/lib/map/style";
 import type { CreateRouteRequestDto, RouteResponseDto } from "@/lib/api/types";
 import { ElevationChart, lineCoords } from "./_shared";
 
@@ -68,14 +73,22 @@ export function CreateRoutePage() {
   const [expanded, setExpanded] = useState(false);
   const [name, setName] = useState("");
   const [isPublic, setPublic] = useState(false);
-  // Initial camera; set from the user's location on mount (else the default).
-  const [center, setCenter] = useState<[number, number]>(DEFAULT_CENTER);
-  const [locateError, setLocateError] = useState(false);
-  const [locating, setLocating] = useState(false);
+  // Shared user location (persisted last-known + auto-refresh) — so the map opens
+  // near the user instead of flashing the default center.
+  const loc = useUserLocation();
+  // Capture the initial center ONCE (last-known or default) so the map mounts there;
+  // a live fix refines it via flyTo below. Re-reads of `loc.center` must not
+  // recreate the map.
+  const [initialCenter] = useState<[number, number]>(() => loc.center);
+  // The user's own position for the "me" marker (live fix, else last known).
+  const userLoc: [number, number] | null = loc.current
+    ? [loc.current.lng, loc.current.lat]
+    : loc.lastKnown;
+
   // Measured bottom-panel height, so the locate button always sits above it.
   const [panelH, setPanelH] = useState(230);
   const panelRef = useRef<HTMLDivElement>(null);
-  // If geolocation resolves before the map is ready, recenter once onReady fires.
+  // If a fix resolves before the map is ready, recenter once onReady fires.
   const pendingCenterRef = useRef<[number, number] | null>(null);
 
   // Snapped geometry (when snap is on and the server returned a road-snapped path).
@@ -86,44 +99,28 @@ export function CreateRoutePage() {
 
   // Live MapLibre instance (from MapView.onReady) for flyTo on locate-me.
   const mapRef = useRef<MapLibreMap | null>(null);
+  // When true, the NEXT fresh fix re-centers the camera. Set on mount + locate-me,
+  // cleared after flying — so background auto-refresh never yanks the camera mid-draw.
+  const flyPendingRef = useRef(true);
 
   // Fly to a position now (map ready) or defer until onReady fires.
-  const flyToUser = (at: [number, number]) => {
+  const flyTo = (at: [number, number]) => {
     if (mapRef.current) mapRef.current.flyTo({ center: at, zoom: LOCATE_ZOOM });
     else pendingCenterRef.current = at;
   };
 
-  // Shared one-shot locate (auto-focus on mount + the locate-me button), with a
-  // visible "locating" indicator while the GPS fix is in flight.
-  const locate = (cancelledRef?: { v: boolean }) => {
-    setLocating(true);
-    void getAdapters()
-      .location.getCurrentPosition()
-      .then((p) => {
-        if (cancelledRef?.v) return;
-        setLocating(false);
-        if (!p) {
-          setLocateError(true);
-          return;
-        }
-        const at: [number, number] = [p.lng, p.lat];
-        setCenter(at);
-        setLocateError(false);
-        flyToUser(at);
-      });
-  };
-
-  // --- auto-focus on the user's location on mount ---
+  // Re-center on the user's fix, but only when a fly was requested (mount/locate-me).
   useEffect(() => {
-    const c = { v: false };
-    locate(c);
-    return () => {
-      c.v = true;
-    };
+    if (!loc.current || !flyPendingRef.current) return;
+    flyTo([loc.current.lng, loc.current.lat]);
+    flyPendingRef.current = false;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [loc.current]);
 
-  const locateMe = () => locate();
+  const locateMe = () => {
+    flyPendingRef.current = true;
+    void loc.refresh();
+  };
 
   // --- keep the locate button above the (variable-height) bottom panel ---
   useEffect(() => {
@@ -200,8 +197,11 @@ export function CreateRoutePage() {
       {/* map canvas (real MapLibre, draw mode) */}
       <div style={{ position: "absolute", inset: 0 }}>
         <MapView
-          center={center}
+          center={initialCenter}
           zoom={DEFAULT_ZOOM}
+          // Never auto-fit: dropping a point must NOT move the camera — the user
+          // keeps whatever pan/zoom they set (locate-me flyTo is the only camera move).
+          fit={false}
           onReady={(map) => {
             mapRef.current = map;
             if (pendingCenterRef.current) {
@@ -211,10 +211,12 @@ export function CreateRoutePage() {
           }}
           onMapClick={addPoint}
           drawCoords={drawCoords}
-          markers={
-            drawCoords.length
+          markers={[
+            // the user's own location (ping marker), shown while drawing
+            ...(userLoc ? [{ lng: userLoc[0], lat: userLoc[1], type: "me" as const }] : []),
+            ...(drawCoords.length
               ? [
-                  { lng: drawCoords[0][0], lat: drawCoords[0][1], type: "start" },
+                  { lng: drawCoords[0][0], lat: drawCoords[0][1], type: "start" as const },
                   ...(drawCoords.length > 1
                     ? [
                         {
@@ -225,8 +227,8 @@ export function CreateRoutePage() {
                       ]
                     : []),
                 ]
-              : undefined
-          }
+              : []),
+          ]}
         />
       </div>
 
@@ -251,7 +253,13 @@ export function CreateRoutePage() {
           <IconBtn
             name="refresh"
             onClick={undo}
-            style={{ background: "rgba(0,0,0,.45)", backdropFilter: "blur(8px)", color: "#fff" }}
+            style={{
+              background: "rgba(0,0,0,.45)",
+              backdropFilter: "blur(8px)",
+              color: "#fff",
+              opacity: pts.length ? 1 : 0.4,
+              pointerEvents: pts.length ? "auto" : "none",
+            }}
           />
           <button
             onClick={() => setSnap((s) => !s)}
@@ -319,7 +327,7 @@ export function CreateRoutePage() {
           transition: "bottom .2s var(--ease-out)",
         }}
       >
-        {locating ? (
+        {loc.locating ? (
           <div
             style={{
               width: 46,
@@ -350,7 +358,7 @@ export function CreateRoutePage() {
         )}
       </div>
 
-      {locating && (
+      {loc.locating && (
         <div
           style={{
             position: "absolute",
@@ -381,7 +389,7 @@ export function CreateRoutePage() {
         </div>
       )}
 
-      {locateError && !locating && pts.length === 0 && (
+      {loc.error && !loc.locating && !userLoc && pts.length === 0 && (
         <div
           style={{
             position: "absolute",

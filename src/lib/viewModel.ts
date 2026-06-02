@@ -14,8 +14,12 @@
 import type { ActivityDto, RouteDto } from "@/lib/api/types";
 import type { ActivityRowData, RouteRole } from "@/components/chrome";
 import { fmtTime, fmtPace } from "@/lib/format";
+import { coordsToThumbPath, type LineInput } from "@/lib/map/geo";
 
-/** Stable faux-thumbnail seed from a string id (the list DTOs carry no path). */
+/**
+ * Fallback faux-thumbnail seed from a string id, used only when a row has no real
+ * geometry (e.g. an activity with too few points to form a track).
+ */
 export function seedFromId(id: string): number {
   let h = 0;
   for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) >>> 0;
@@ -71,6 +75,9 @@ export function toActivityRow(
   opts: { synced?: boolean; now?: Date } = {},
 ): ActivityRowData {
   const pace = activityPaceSPerKm(a);
+  // Real (simplified) track from the list DTO → SVG thumbnail; faux seed only if
+  // the run has no usable track.
+  const track = coordsToThumbPath((a.track ?? undefined) as LineInput);
   return {
     title: a.title,
     type: a.type,
@@ -78,6 +85,7 @@ export function toActivityRow(
     dist: metersToKm(a.distanceM),
     dur: fmtTime(Number(a.durationMs) / 1000),
     pace: pace == null ? "--" : fmtPace(pace),
+    track: track || undefined,
     seed: seedFromId(a.id),
     synced: opts.synced ?? true,
   };
@@ -104,9 +112,12 @@ export function toRouteCard(
   members: number;
   isPublic: boolean;
   liveNow: number;
+  path?: string;
   seed: number;
 } {
   const elev = typeof r.elevationGainM === "number" ? r.elevationGainM : 0;
+  // Real (simplified) route path from the list DTO → SVG thumbnail.
+  const path = coordsToThumbPath((r.geometry ?? undefined) as LineInput);
   return {
     name: r.name,
     dist: metersToKm(r.distanceM),
@@ -115,6 +126,7 @@ export function toRouteCard(
     members: opts.members ?? 0,
     isPublic: r.isPublic,
     liveNow: opts.liveNow ?? 0,
+    path: path || undefined,
     seed: seedFromId(r.id),
   };
 }

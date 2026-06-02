@@ -15,6 +15,7 @@
  */
 import type {
   GeoPoint,
+  LocationPermissionState,
   LocationTracker,
   LocationTrackerOptions,
   TrackerError,
@@ -133,6 +134,22 @@ export class WebLocationTracker implements LocationTracker {
         { enableHighAccuracy: true, maximumAge: 30000, timeout: 15000 },
       );
     });
+  }
+
+  /**
+   * Reads the geolocation permission via the Permissions API without prompting.
+   * Returns `"unknown"` where it isn't supported (so callers fall back to the
+   * prompt flow). TODO(Capacitor): NativeLocationTracker queries
+   * `@capacitor/geolocation`'s `checkPermissions()` instead.
+   */
+  async getPermissionState(): Promise<LocationPermissionState> {
+    try {
+      if (!("permissions" in navigator) || !navigator.permissions?.query) return "unknown";
+      const status = await navigator.permissions.query({ name: "geolocation" as PermissionName });
+      return status.state as LocationPermissionState;
+    } catch {
+      return "unknown";
+    }
   }
 
   private accept(p: GeoPoint): boolean {

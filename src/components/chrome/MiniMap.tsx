@@ -22,6 +22,12 @@ export interface FauxMapProps {
   mapStyle?: FauxMapStyle;
   dim?: boolean;
   glow?: boolean;
+  /**
+   * When the route line is REAL geometry (not the demo), suppress the random
+   * faux street network + blobs and show only land + grid behind it — otherwise
+   * the random roads don't match the real route and look wrong.
+   */
+  plain?: boolean;
   children?: ReactNode;
 }
 
@@ -34,6 +40,7 @@ export function FauxMap({
   mapStyle,
   dim = false,
   glow = true,
+  plain = false,
   children,
 }: FauxMapProps) {
   const st = mapStyle || style;
@@ -64,30 +71,33 @@ export function FauxMap({
           </filter>
         </defs>
         <rect x="0" y="0" width="100" height="100" fill="var(--map-land)" />
-        {blobs.map((b, i) => (
-          <ellipse
-            key={i}
-            cx={b.cx}
-            cy={b.cy}
-            rx={b.rx}
-            ry={b.ry}
-            transform={`rotate(${b.rot} ${b.cx} ${b.cy})`}
-            fill={b.kind === "water" ? "var(--map-water)" : "var(--map-park)"}
-            opacity="0.9"
-          />
-        ))}
+        {!plain &&
+          blobs.map((b, i) => (
+            <ellipse
+              key={i}
+              cx={b.cx}
+              cy={b.cy}
+              rx={b.rx}
+              ry={b.ry}
+              transform={`rotate(${b.rot} ${b.cx} ${b.cy})`}
+              fill={b.kind === "water" ? "var(--map-water)" : "var(--map-park)"}
+              opacity="0.9"
+            />
+          ))}
         {Array.from({ length: 11 }).map((_, i) => (
           <line key={"h" + i} x1="0" y1={i * 10} x2="100" y2={i * 10} stroke="var(--map-grid)" strokeWidth="0.4" />
         ))}
         {Array.from({ length: 11 }).map((_, i) => (
           <line key={"v" + i} x1={i * 10} y1="0" x2={i * 10} y2="100" stroke="var(--map-grid)" strokeWidth="0.4" />
         ))}
-        {minor.map((d, i) => (
-          <path key={"m" + i} d={d} stroke="var(--map-road)" strokeWidth="0.9" fill="none" strokeLinecap="round" />
-        ))}
-        {roads.map((d, i) => (
-          <path key={"r" + i} d={d} stroke="var(--map-road-major)" strokeWidth="2.2" fill="none" strokeLinecap="round" />
-        ))}
+        {!plain &&
+          minor.map((d, i) => (
+            <path key={"m" + i} d={d} stroke="var(--map-road)" strokeWidth="0.9" fill="none" strokeLinecap="round" />
+          ))}
+        {!plain &&
+          roads.map((d, i) => (
+            <path key={"r" + i} d={d} stroke="var(--map-road-major)" strokeWidth="2.2" fill="none" strokeLinecap="round" />
+          ))}
         {trackD && routeD && (
           <path
             d={routeD}
@@ -151,7 +161,7 @@ export function MiniMap({ path, seed, size = 56, r = 14, mapStyle, dim }: MiniMa
         border: "1px solid var(--border)",
       }}
     >
-      <FauxMap seed={seed} routeD={path} mapStyle={mapStyle} dim={dim} glow={size > 80} />
+      <FauxMap seed={seed} routeD={path} mapStyle={mapStyle} dim={dim} glow={size > 80} plain={!!path} />
     </div>
   );
 }

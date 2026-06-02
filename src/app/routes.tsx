@@ -14,6 +14,7 @@
 import { createBrowserRouter, Navigate, Outlet } from "react-router-dom";
 import { AppShell, type RouteHandle } from "@/components/layout/AppShell";
 import { AuthProvider, useAuth } from "@/lib/auth/AuthProvider";
+import { UserLocationProvider } from "@/lib/location/UserLocationProvider";
 
 import { HomePage } from "@/components/pages/home/HomePage";
 import { LoginPage } from "@/components/pages/auth/LoginPage";
@@ -37,7 +38,9 @@ import { SettingsPage } from "@/components/pages/settings/SettingsPage";
 function RootLayout() {
   return (
     <AuthProvider>
-      <Outlet />
+      <UserLocationProvider>
+        <Outlet />
+      </UserLocationProvider>
     </AuthProvider>
   );
 }

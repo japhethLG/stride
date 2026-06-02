@@ -31,6 +31,7 @@ import { useRoutes } from "@/lib/api/routes";
 import { useInvites, useAcceptInvite, useDeclineInvite } from "@/lib/api/memberships";
 import { useRecordingStore } from "@/lib/recording/store";
 import { useAuth } from "@/lib/auth/AuthProvider";
+import { useUserLocation } from "@/lib/location/UserLocationProvider";
 import { useUnits } from "@/lib/prefs/store";
 import { distUnit } from "@/lib/format";
 import { useToast } from "@/lib/useToast";
@@ -52,6 +53,11 @@ export function HomePage() {
   const units = useUnits();
   const toast = useToast();
   const { user } = useAuth();
+
+  const loc = useUserLocation();
+  const here: [number, number] | null = loc.current
+    ? [loc.current.lng, loc.current.lat]
+    : loc.lastKnown;
 
   const me = useMe();
   const stats = useStatsSummary();
@@ -173,7 +179,16 @@ export function HomePage() {
             border: "1px solid var(--border)",
           }}
         >
-          <MapView interactive={false} fit={false} glow={false} style={{ position: "absolute", inset: 0 }} />
+          <MapView
+            interactive={false}
+            glow={false}
+            // Start at the best-known location; the "me" marker drives auto-fit so
+            // the hero re-centers on the user once a live fix arrives.
+            center={loc.center}
+            fit={!!here}
+            markers={here ? [{ lng: here[0], lat: here[1], type: "me" as const }] : undefined}
+            style={{ position: "absolute", inset: 0 }}
+          />
           <div
             style={{
               position: "absolute",

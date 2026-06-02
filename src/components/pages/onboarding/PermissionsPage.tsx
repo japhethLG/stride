@@ -20,6 +20,7 @@ import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Btn, Icon, Row } from "@/components/primitives";
 import { getAdapters } from "@/adapters";
+import { useUserLocation } from "@/lib/location/UserLocationProvider";
 import type { IconName } from "@/components/primitives";
 
 type PermState = "prompt" | "requesting" | "denied";
@@ -39,17 +40,26 @@ const USES: UseRow[] = [
 
 export function PermissionsPage() {
   const navigate = useNavigate();
+  const loc = useUserLocation();
   const [state, setState] = useState<PermState>("prompt");
   const cancelled = useRef(false);
 
+  const proceed = () => navigate("/", { replace: true });
+
   useEffect(() => {
     cancelled.current = false;
+    // Safety net: if we land here while location is already granted (e.g. direct
+    // nav), skip straight through — no need to ask again.
+    void getAdapters()
+      .location.getPermissionState()
+      .then((s) => {
+        if (!cancelled.current && s === "granted") proceed();
+      });
     return () => {
       cancelled.current = true;
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
-  const proceed = () => navigate("/", { replace: true });
 
   const request = async () => {
     setState("requesting");
@@ -59,6 +69,9 @@ export function PermissionsPage() {
       // first acceptable fix. We only need the grant — stop the probe right away.
       await tracker.start({ keepScreenOn: false });
       await tracker.stop();
+      // Seed the shared location context now that we're granted, so the next map
+      // screen opens centered on the user (no wait for the auto-refresh tick).
+      void loc.refresh();
       if (!cancelled.current) proceed();
     } catch {
       // Permission denied / position unavailable: surface the design's denied state.

@@ -35,6 +35,13 @@ export interface TrackerError {
   message: string;
 }
 
+/**
+ * The OS/browser geolocation permission, read WITHOUT prompting. `"unknown"` is
+ * returned where the platform can't report it (e.g. some Safari builds lack the
+ * Permissions API for geolocation) — callers treat `"unknown"` like `"prompt"`.
+ */
+export type LocationPermissionState = "granted" | "denied" | "prompt" | "unknown";
+
 export interface LocationTrackerOptions {
   /** default 1000 — throttles to protect upload/RTDB budgets */
   minIntervalMs?: number;
@@ -61,6 +68,12 @@ export interface LocationTracker {
    * denied or no fix is available — callers fall back gracefully, never throw.
    */
   getCurrentPosition(): Promise<GeoPoint | null>;
+  /**
+   * Best-effort read of the current geolocation permission WITHOUT prompting, so
+   * the app can skip the permission-onboarding screen when access is already
+   * `"granted"`. Resolves `"unknown"` where the platform can't report it.
+   */
+  getPermissionState(): Promise<LocationPermissionState>;
   pause(): void;
   resume(): void;
   stop(): Promise<void>;

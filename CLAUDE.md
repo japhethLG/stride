@@ -31,16 +31,16 @@
 | Server state | **TanStack Query v5** | every backend read/write goes through a typed hook (§6) |
 | HTTP client | **openapi-fetch** | one browser client + Bearer middleware ([lib/api/client.ts](src/lib/api/client.ts)) |
 | Type generation | **openapi-typescript** | against the backend's `/api-docs-json` → [lib/api/schema.d.ts](src/lib/api/schema.d.ts) (generated) |
-| Client state | **Zustand** | UI-only stores: modals (§8), sheets (§9), mobile-actions FAB (§10), recording session (§12) |
-| Forms | **react-hook-form** + **zod** | via `components/formElements/*` (§7.1) |
+| Client state | **Zustand** | **Built:** the recording-session store (§12). Target stores — modals (§8), sheets (§9), mobile-actions FAB (§10.1) — not built yet |
+| Forms | **react-hook-form** + **zod** = target (§7.1) | **Built:** `Field` + `useState` (RHF/zod not installed yet); add `Form*` wrappers when migrating |
 | Auth | `firebase` (client SDK) | Google + email; Bearer ID token only (§11) |
-| Maps | **MapLibre GL JS** + `maplibre-gl` | free/open renderer; consumed via a map primitive (§5) |
-| Tiles | **OpenFreeMap** (→ self-host Protomaps PMTiles) | no API key now |
-| Route drawing | **Terra Draw** (`maplibre-gl-terradraw`) | draw/snap a route line (§5) |
-| Routing API | **OpenRouteService** | snap-to-road / directions (later: self-host GraphHopper/Valhalla) |
+| Maps | **MapLibre GL JS** + `maplibre-gl` | free/open renderer; consumed via the `MapView` primitive ([components/map/MapView.tsx](src/components/map/MapView.tsx), §5) |
+| Tiles | **OpenFreeMap** (→ self-host Protomaps PMTiles) | no API key now; runtime dark recolor + raster fallback in [lib/map/](src/lib/map/) |
+| Route drawing | **tap-to-draw** (map clicks drop waypoints) | our own overlay on `MapView` — **no draw library** (Terra Draw was trialled and removed — not needed) (§5) |
+| Snap-to-road | **backend `POST /api/routing/snap`** (GraphHopper) | the FE calls our backend, not a routing API directly; `useSnapRoute()` with foot/bike/car profiles (§5) |
 | Realtime | **Firebase Realtime Database** (`firebase` JS SDK) | live multi-user positions (§12) |
-| Icons | `lucide-react` | consumed only via [Icon.tsx](src/components/primitives/Icon.tsx) |
-| Styling | Tailwind + `cn()` in [lib/utils.ts](src/lib/utils.ts) | |
+| Icons | `lucide-react` = target | **Built:** a custom `Icon` set in [primitives/Icon.tsx](src/components/primitives/Icon.tsx) (lucide not installed); add icons there |
+| Styling | Tailwind + `cn()` = target | **Built:** inline styles + CSS-var tokens ([styles/tokens.css](src/styles/tokens.css)) for pixel-fidelity port; Tailwind not installed |
 | Lint | Biome (or configured linter) | |
 | PWA | **`vite-plugin-pwa`** (Workbox) | manifest + service worker (§13) — NOT Serwist/Next |
 
@@ -82,31 +82,37 @@ src/
 │   └── index.ts             # composition root — picks impl by platform
 ├── components/
 │   ├── primitives/          # OUR design system — page code uses these (§7)
-│   ├── ui/                  # raw headless wrappers — consumed BY primitives only
-│   ├── formElements/        # RHF-bound primitive wrappers (§7.1)
+│   ├── ui/                  # (planned) raw headless wrappers consumed BY primitives — not built yet
+│   ├── formElements/        # (planned) RHF-bound primitive wrappers (§7.1) — not built yet
+│   ├── chrome/              # ambient UI (faux-map bg, toasts) — BUILT
 │   ├── map/                 # MapView primitive + draw/live overlays (§5)
-│   ├── layout/              # AppShell, BottomNav, TopBar, MobilePageFab (§10)
+│   ├── layout/              # AppShell, BottomNav, TopBar, page FAB (§10)
 │   ├── pages/               # page-level composites (the real screen UI; §4.2)
-│   ├── modals/              # BaseModal + registry (§8)
-│   └── sheets/              # BaseSheet + registry — mobile bottom sheets (§9)
+│   ├── modals/              # (planned) BaseModal + registry (§8) — not built yet
+│   └── sheets/              # BUILT: local BaseSheet + ActionMenu (registry is the §9 target)
 └── lib/
     ├── api/
     │   ├── client.ts        # openapi-fetch + Bearer middleware
     │   ├── hooks.ts         # useApiQuery / useApiMutation / invalidate helpers
     │   ├── schema.d.ts      # GENERATED
-    │   └── <entity>/        # one folder per entity (§6)
+    │   └── <entity>/        # one folder per entity (§6) — incl. routing/ (snap), live/ (rtdb)
     ├── firebase/client.ts   # Firebase app + auth + RTDB init
-    ├── auth/                # AuthProvider, actions (signIn/Out), guard (§11)
-    ├── map/                 # style config, pmtiles protocol, ORS client (§5)
-    ├── modals/{registry,store,host}.ts
-    ├── sheets/{registry,store,host}.ts
-    ├── recording/store.ts   # active-run Zustand store + IndexedDB buffer (§12)
-    └── utils.ts             # cn(), small helpers
+    ├── auth/                # AuthProvider, sign-in/out, guard (§11)
+    ├── map/                 # style.ts, darkTheme.ts, geo.ts, markers.ts (§5)
+    ├── location/            # UserLocationProvider — shared device location (§5)
+    ├── recording/           # active-run store + live-writer (RTDB) (§12)
+    ├── db/                  # IndexedDB point buffer
+    ├── prefs/               # local user prefs (theme, etc.)
+    ├── format.ts            # distance/pace/time formatters
+    ├── viewModel.ts         # shared view-model helpers
+    └── useToast.tsx         # toast hook
+    # (planned, per §8/§9 targets) lib/modals/ + lib/sheets/ registry/store/host — not built yet
 ```
 
 There is **no** `app/`, **no** `pages/` route files, **no** `proxy.ts`, **no**
 `server.ts` API client. Stale references to those (carried over from a Next.js
-template) are wrong.
+template) are wrong. **There is no `lib/utils.ts` / `cn()`** (that was a Tailwind
+helper — styling is inline tokens, §1).
 
 ---
 
@@ -139,6 +145,14 @@ export interface AuthService { /* wraps Firebase sign-in/out + token */ }
   dodge the ~5-min backgrounded-WebView fetch throttle.
 - `adapters/index.ts` is the **composition root** — it picks web vs native once,
   by platform detection. Nothing else branches on platform.
+
+- **Don't re-ask for location every login.** `LocationTracker.getPermissionState()`
+  reads the geolocation permission *without* prompting (web: `navigator.permissions.query`).
+  After auth, `LoginPage` skips the `/onboarding/permissions` screen straight to
+  `/` when it's already `"granted"` (and the permissions screen self-skips on mount
+  too). Only `"prompt"`/`"denied"`/`"unknown"` show the onboarding screen. Route
+  any new "should I ask for X permission?" check through an adapter method like
+  this — never call `navigator.permissions` from a component.
 
 **PWA recording is foreground-only.** With the screen off / tab hidden the web
 `LocationTracker` stops producing points (a documented web-platform limit — see
@@ -179,13 +193,55 @@ through the route table. No business logic in `routes.tsx`.
 - The map **style** (sources/layers) lives in [lib/map/](src/lib/map/) — one
   shared style pointing at OpenFreeMap now; the `pmtiles` protocol is registered
   there for the later self-host swap. Changing the basemap = editing one file.
-- **Route drawing:** Terra Draw, wrapped behind a draw-overlay component. After
-  the user draws, **snap-to-road** calls the ORS client in `lib/map/` and the
-  snapped GeoJSON is what gets saved (§6) — never persist the raw freehand line.
+- **Route drawing (as built): tap-to-draw, no draw library.** Map clicks on
+  `MapView` (`onMapClick`) drop real `{lng,lat}` waypoints; an Undo control pops
+  the last one. (Terra Draw was trialled for editable vertices and removed — the
+  manual flow is enough for now.)
+- **⚠️ Drawing must NOT move the camera.** Create-route mounts `MapView` with
+  `fit={false}`, because `MapView`'s auto-fit effect re-frames on every
+  `drawCoords`/`markers` change — which made the map jump/zoom on *every* dropped
+  point. With `fit={false}` the only camera move is the locate-me `flyTo`. If you
+  add a drawing surface elsewhere, pass `fit={false}` too.
+- **User location is a shared context — `useUserLocation()`**
+  ([lib/location/UserLocationProvider.tsx](src/lib/location/UserLocationProvider.tsx)),
+  mounted in `RootLayout`. It persists the **last-known** `[lng,lat]` to
+  localStorage and **auto-refreshes** the live fix on an interval *while permission
+  is granted* (never prompts on its own — that's the onboarding screen / the
+  explicit `refresh()`). Map screens read `loc.center` (live → last-known →
+  `DEFAULT_CENTER`) for the initial camera so they open **near the user, not on the
+  default center**, and `loc.current`/`loc.lastKnown` for the `type:"me"` marker.
+  **Don't reintroduce per-screen `getCurrentPosition` for centering — use the
+  context.** Continuous tracking for an active *run* still belongs to
+  `lib/recording` via the tracker's `start()` (§12); this context is for centering
+  maps only and must not contend with it.
+- **Snap-to-road goes through the backend, not a routing API.** When the Snap
+  toggle is on (≥2 waypoints), `useSnapRoute()` (`POST /api/routing/snap`, with a
+  `foot`/`bike`/`car` profile) returns the road-snapped GeoJSON, and **that** is
+  what gets drawn + saved (§6) — never persist the raw waypoints when snap is on.
+  The backend proxies GraphHopper; the FE never calls GraphHopper/ORS directly.
 - **Live positions** (§12) render as a dedicated overlay layer fed by the RTDB
   subscription; keep it separate from the static route layer so re-renders are cheap.
+- **⚠️ Route/run thumbnails are SVG, NOT `MapView` — WebGL contexts are scarce.**
+  Each `MapView` is a full MapLibre WebGL context and browsers cap those (~16); a
+  `MapView` per list card crashes/janks. List cards (`RouteCard`, `ActivityRow`)
+  use the **`MiniMap`** SVG thumbnail ([components/chrome/MiniMap.tsx](src/components/chrome/MiniMap.tsx)):
+  the backend returns a **simplified** route/track in *list* responses (full
+  geometry only on detail — BE §8.4), and `coordsToThumbPath()` ([lib/map/geo.ts](src/lib/map/geo.ts))
+  projects it into the 0..100 viewBox the SVG draws (aspect-corrected, centered).
+  When a real path is present the faux street network is suppressed (`plain`).
+  **Never put a `MapView` in a list row** — only "hero"/detail screens get a live
+  map (e.g. Home's single start-run hero, centered on `loc.center` with a "me"
+  marker; §5 location context above).
 - MapLibre carries over **unchanged** into Capacitor (it runs in the WebView) —
   this is a reason the drawing/map stack favors the web surface.
+- **Locate / auto-focus (CreateRoute):** the camera opens at `loc.center` (above)
+  and a "me" marker shows the user. `flyTo` re-centers only on **mount and explicit
+  locate-me** (a `flyPendingRef` guards it) — never on a background auto-refresh,
+  which would yank the camera mid-draw. The locate button shows `loc.locating` and
+  calls `loc.refresh()`. Because the bottom panel's height varies (the profile
+  selector grows it), that button is positioned above it via a
+  `ResizeObserver`-measured offset — don't hard-code its `bottom`. Use
+  `pendingCenterRef` to avoid a flyTo race before the map loads.
 
 ---
 
@@ -245,23 +301,19 @@ return useApiMutation("/api/v1/routes", "post", {
 ## 7. UI primitives — strict enforcement
 
 Every interactive element comes from [`components/primitives/`](src/components/primitives/)
-(Button, Input, Select, Textarea, Card, Avatar, Pressable, DataList, …).
-[`components/ui/`](src/components/ui/) is consumed **only by primitives** — page
-code never imports from it.
+(Button, IconBtn, Field, Icon, Card, Avatar, Segmented, Spinner, …) — these are
+**built** as inline-style/CSS-token components (§1). Page code uses these, not raw
+HTML elements; use react-router `<Link>` for navigation.
 
-`scripts/enforce-ui-primitives.mjs` (part of `npm run check`) fails the build on
-these native elements outside `components/primitives/` and `components/ui/`:
-
-```
-<button>  <input>  <select>  <textarea>  <img>  <label>  <a>
-```
-
-Wrap in the matching primitive instead of silencing the linter. Use react-router
-`<Link>` for navigation (the linter only flags raw `<a>`).
+> **Target, not yet enforced:** the `components/ui/` headless-wrapper split, the
+> `scripts/enforce-ui-primitives.mjs` lint, and the `npm run check` gate don't
+> exist yet. The *rule* (no raw `<button>`/`<input>`/`<img>`/`<a>` in pages —
+> wrap them in a primitive) still holds; it's just convention-enforced today. Add
+> the script when the primitive set stabilizes.
 
 ### 7.1 Forms
 
-Compose RHF + zod via `components/formElements/*`:
+**Target:** compose RHF + zod via `components/formElements/*`:
 
 ```tsx
 const methods = useForm<Values>({ resolver: zodResolver(schema) });
@@ -271,15 +323,22 @@ const methods = useForm<Values>({ resolver: zodResolver(schema) });
 </Form>
 ```
 
-Don't reach for `<input>` + `register()` directly — add a `Form*` wrapper if one
-is missing.
+**Built today:** RHF/zod/`formElements` are **not installed**. Forms use the
+`Field` primitive + local `useState` and a plain submit handler. That's fine for
+the PoC's small forms; when forms grow (cross-field validation, arrays), add RHF
++ zod and the `Form*` wrappers rather than hand-rolling validation.
 
 ---
 
 ## 8. Modal system
 
-Every modal renders inside [BaseModal.tsx](src/components/modals/BaseModal.tsx).
-Never render a standalone overlay/portal.
+> **Status: target, not built yet.** There is no `components/modals/`, no
+> `lib/modals/` registry, and no `BaseModal` today — the PoC has had no desktop
+> modal need. This section is the pattern to adopt **when you add the first
+> modal** (mirror the §9 sheet system). Until then, don't reference a registry
+> that isn't there.
+
+Every modal renders inside `BaseModal.tsx`. Never render a standalone overlay/portal.
 
 ```
 src/components/modals/<name>/<Name>Modal.tsx   # component + declare-module augmentation
@@ -301,9 +360,23 @@ inside components.
 ## 9. Sheets — mobile bottom sheets
 
 Modals (§8) are the desktop-centred overlay; **sheets** are the mobile
-bottom-sheet counterpart (drag handle, snap points, safe-area footer). They live
-in `src/components/sheets/` driven by a **separate registry/host/store that
-mirrors the modal system one-for-one** — don't conflate them.
+bottom-sheet counterpart (drag handle, safe-area footer). The **target** is a
+`src/components/sheets/` registry/host/store mirroring the modal system one-for-one.
+
+> **Built today (no registry yet):** `components/sheets/` is just a **local
+> `BaseSheet` + `ActionMenu`**. Pages own their sheet's `open` state and render
+> `<BaseSheet open=… onOpenChange=… />` inline. This has been enough so far; add
+> the registry/host/store when sheets multiply and need to open from outside React.
+>
+> **⚠️ CRITICAL — render a sheet ONLY when open.** `BaseSheet` does
+> `if (!open) return null` and uses `position: fixed; inset: 0`. An earlier
+> version kept every sheet mounted and hid it with `transform: translateY(110%)`
+> inside a `position: absolute` wrapper — on **Android Chrome** the positioned-
+> ancestor height chain collapsed, so closed panels weren't anchored to the
+> viewport bottom and **every sheet on the page showed through at once**. Never
+> reintroduce always-mounted + transform-hidden sheets. The open animation runs
+> on mount via the `strideSheetUp` / `strideScrimIn` keyframes
+> ([styles/tokens.css](src/styles/tokens.css)).
 
 - Use a **sheet** for a mobile-first flow (start a run, invite a member, account
   menu); a **modal** for confirmations / desktop forms. A flow may ship both.
@@ -328,6 +401,10 @@ Per [ui-spec.md](docs/ui-spec.md) the bottom nav is 4 tabs: **Home / Routes /
 Record / Profile** (Record is the emphasized center CTA → full-screen recording).
 
 ### 10.1 Page-action FAB
+
+> **Status: target, not built yet.** There's no `mobile-actions` store today —
+> pages render their own action buttons inline (e.g. CreateRoute's locate/undo/save
+> controls). Adopt the pattern below when a page needs a shared, tab-aware FAB.
 
 A page publishes its primary action(s) via the mobile-actions store:
 
@@ -414,6 +491,12 @@ Installable PWA via **`vite-plugin-pwa`** (Workbox) — manifest + service worke
 When the Capacitor shell lands, the native WebView loads local assets and this SW
 is largely bypassed — keep PWA-only logic out of feature code.
 
+> **⚠️ Deploy gotcha — stale cache:** with the SW registered (`autoUpdate`), a
+> freshly deployed build is often **not** what an already-open client sees until
+> the SW updates. When verifying a deploy, do a **hard refresh** (or close all
+> tabs) — otherwise you're testing the previous bundle and will chase phantom
+> "fix didn't work" reports.
+
 ---
 
 ## 14. Anti-patterns — non-obvious traps
@@ -428,8 +511,9 @@ is largely bypassed — keep PWA-only logic out of feature code.
 | Editing `src/lib/api/schema.d.ts` by hand | Regenerated — your edits vanish (`npm run api:types`) |
 | Storing the Firebase ID token in state/localStorage | `getIdToken()` refreshes per request (§11) |
 | Reintroducing RSC / `page.tsx` / a server API client / `proxy.ts` | This is a client SPA — none of those exist (header, §3) |
-| Persisting the raw freehand drawn line | Save the **snapped** GeoJSON from ORS (§5) |
+| Persisting the raw tapped waypoints when Snap is on | Save the **snapped** GeoJSON from `POST /api/routing/snap` (§5) |
 | Instantiating `maplibre.Map` inline in a page | Use the `MapView` primitive (§5) |
+| A `MapView` in each list card for a route/run thumbnail | Use the SVG `MiniMap` — WebGL contexts are capped (~16); only heroes/detail get a live map (§5) |
 | Writing every GPS fix to RTDB, or writing `routeMembers/*` from the client | Throttle live writes (~1/2s); membership index is backend-only (§12) |
 | Computing leaderboard rank client-side | Rank comes from the backend's PostGIS match on activity save (§12) |
 | Rendering a modal/sheet overlay inline instead of via `BaseModal`/`BaseSheet` + registry | Breaks ESC/backdrop/drag handling (§8, §9) |
@@ -445,8 +529,27 @@ is largely bypassed — keep PWA-only logic out of feature code.
 1. Ran `npm run api:types` after the backend changed?
 2. Device capability used only through a `src/adapters/` interface (no direct `navigator.*` / plugin / upload `fetch`)?
 3. Every backend call goes through a typed entity hook; every new mutation calls `invalidate<Entity>`?
-4. New modal/sheet: uses `BaseModal`/`BaseSheet`, the `declare module` augmentation, and appears in its `index.ts` + host registry?
-5. New full-page composite follows the mobile recipe (bottom-nav + FAB clearance, card lists, thumb-reach)?
-6. No native HTML elements outside primitives; no inline `maplibre.Map`?
+4. New sheet uses the local `BaseSheet` and **renders only when open** (never always-mounted + transform-hidden — §9)? (If you build the registry/modals, follow §8/§9.)
+5. New full-page composite follows the mobile recipe (bottom-nav clearance, card lists, thumb-reach)?
+6. No raw HTML elements in pages (use primitives); no inline `maplibre.Map` (use `MapView`)?
 7. Live writes throttled; no client writes to `routeMembers/*`; SW doesn't cache `/api` or Firebase hosts?
-8. `npm run check` + `npm run typecheck` + `npm run build` green?
+8. `npm run typecheck` + `npm run build` green? (`npm run check` doesn't exist yet — §7.)
+
+---
+
+## 16. Deployment (as built)
+
+The SPA builds to static assets (`npm run build`) served by an **nginx**
+container (`stride-web`) behind a shared Caddy proxy — live at
+**https://stride.crabdance.com** (Caddy routes `/api*` → the backend, everything
+else → this SPA).
+
+- **Build-time env:** `VITE_API_BASE_URL=https://stride.crabdance.com` and the
+  `VITE_FIREBASE_*` web config live in `.env.production` (**gitignored — never
+  commit**). `api:types` reads `${VITE_API_BASE_URL}/api-docs-json`.
+- **TLS:** the cert uses a **ZeroSSL** issuer (the shared crabdance.com zone hit
+  Let's Encrypt rate limits). The shared `caddy-proxy` is edited via `docker cp` +
+  `caddy reload` — never restart it.
+- **Standing manual step:** `stride.crabdance.com` must be in Firebase → Auth →
+  Authorized domains or Google sign-in fails in prod.
+- After deploying, **hard-refresh** to bypass the service worker (§13).

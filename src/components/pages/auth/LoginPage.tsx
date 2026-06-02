@@ -17,6 +17,7 @@ import { Btn, Field, Icon, Segmented, Wordmark } from "@/components/primitives";
 import { Toast } from "@/components/chrome";
 import { MapView } from "@/components/map/MapView";
 import { useAuth } from "@/lib/auth/AuthProvider";
+import { getAdapters } from "@/adapters";
 import { PATHS } from "@/components/pages/auth/heroPath";
 
 type Mode = "signin" | "signup";
@@ -35,7 +36,12 @@ export function LoginPage() {
   const [toast, setToast] = useState("");
   const signup = mode === "signup";
 
-  const goNext = () => navigate("/onboarding/permissions");
+  // After auth, only show the permission-onboarding screen if location isn't
+  // already granted — otherwise go straight to the app (don't re-ask every login).
+  const goNext = async () => {
+    const perm = await getAdapters().location.getPermissionState();
+    navigate(perm === "granted" ? "/" : "/onboarding/permissions", { replace: true });
+  };
 
   const submit = async () => {
     setErr("");
@@ -51,7 +57,7 @@ export function LoginPage() {
     try {
       if (signup) await signUpWithEmail(email, pw);
       else await signInWithEmail(email, pw);
-      goNext();
+      await goNext();
     } catch (e) {
       setErr(e instanceof Error ? e.message : "Something went wrong. Please try again.");
     } finally {
@@ -64,7 +70,7 @@ export function LoginPage() {
     setLoading(true);
     try {
       await signInWithGoogle();
-      goNext();
+      await goNext();
     } catch (e) {
       setErr(e instanceof Error ? e.message : "Could not sign in with Google.");
     } finally {

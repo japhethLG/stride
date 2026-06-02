@@ -28,6 +28,7 @@ import { useLiveRunners } from "@/lib/api/live";
 import { useAuth } from "@/lib/auth/AuthProvider";
 import { useRecordingStore } from "@/lib/recording/store";
 import { useRecordingSubmit } from "@/lib/recording/submit";
+import { useUserLocation } from "@/lib/location/UserLocationProvider";
 import { useUnits } from "@/lib/prefs/store";
 import { fmtKm, distUnit } from "@/lib/format";
 import { fmtTime, fmtPace, lineCoords, asText } from "./_shared";
@@ -49,6 +50,9 @@ export function RecordPage() {
   // route, excluding myself, keeping only runners with a known position. No-op
   // (empty) when Firebase is unconfigured or this is a free run (no routeId).
   const { user } = useAuth();
+  // Shared device location — centers the map (and shows a "me" marker) before the
+  // run starts, instead of falling back to the default center.
+  const loc = useUserLocation();
   const liveRt = useLiveRunners(routeId);
   const otherRunners = liveRt.runners.filter(
     (p) =>
@@ -97,6 +101,10 @@ export function RecordPage() {
   );
   const me = meCoords[meCoords.length - 1];
   const start = routeCoords[0];
+  // The user's own position before any track points exist (live fix, else last known).
+  const here: [number, number] | null = loc.current
+    ? [loc.current.lng, loc.current.lat]
+    : loc.lastKnown;
 
   async function handleStart() {
     setError(null);
@@ -142,13 +150,18 @@ export function RecordPage() {
       label: (p.displayName ?? "Runner").split(" ")[0],
       dim: !p.online,
     })),
-    ...(me ? [{ lng: me[0], lat: me[1], type: "me" as const }] : []),
+    // "me": the live track head while recording, else the device location.
+    ...(me
+      ? [{ lng: me[0], lat: me[1], type: "me" as const }]
+      : here
+        ? [{ lng: here[0], lat: here[1], type: "me" as const }]
+        : []),
   ];
 
   return (
     <div style={{ position: "absolute", inset: 0 }}>
       <MapView
-        center={start ? [start[0], start[1]] : undefined}
+        center={start ? [start[0], start[1]] : loc.center}
         routeD={routeCoords}
         trackD={meCoords}
         markers={markers}
