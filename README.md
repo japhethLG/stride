@@ -4,7 +4,7 @@ A Strava-style run/jog/activity tracker — **proof of concept**.
 
 This repository is the **frontend**: a React **PWA** (Vite + MapLibre GL JS) architected to transition to a **Capacitor** Android shell later (for background GPS). The API reuses the existing `fitnessBackend` repo (NestJS + Prisma + Postgres/PostGIS + Firebase Auth).
 
-## Core features (PoC scope)
+## Core features (PoC scope) 
 
 1. Create a route by dragging points on a map (snap-to-road).
 2. Invite other users to a route.
