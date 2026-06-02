@@ -221,6 +221,14 @@ through the route table. No business logic in `routes.tsx`.
   The backend proxies GraphHopper; the FE never calls GraphHopper/ORS directly.
 - **Live positions** (§12) render as a dedicated overlay layer fed by the RTDB
   subscription; keep it separate from the static route layer so re-renders are cheap.
+- **Distinguishing live runners:** each *other* runner gets a deterministic color
+  from `runnerColor(uid)` ([components/chrome/MiniMap.tsx](src/components/chrome/MiniMap.tsx))
+  used for BOTH their map marker (`type:"runner"` with `color` + first-name label)
+  and their roster entry (the RouteLive avatar ring), so a dot on the map maps to a
+  name in the list. The signature accent is reserved for the route line + the
+  user's own `type:"me"` ping. Record + RouteLive show a "N running now / you're the
+  only one here" roster so the (otherwise invisible-when-solo) live feature is
+  discoverable.
 - **⚠️ Route/run thumbnails are SVG, NOT `MapView` — WebGL contexts are scarce.**
   Each `MapView` is a full MapLibre WebGL context and browsers cap those (~16); a
   `MapView` per list card crashes/janks. List cards (`RouteCard`, `ActivityRow`)

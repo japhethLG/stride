@@ -11,6 +11,24 @@
 import { useMemo, type ReactNode } from "react";
 import { buildStreets, type FauxMapStyle } from "./fauxMap";
 
+/**
+ * Distinct, on-dark-readable colors for OTHER live runners, so multiple runners
+ * on a route are visually separable (their marker dot + name tag use this). The
+ * signature accent (#FF4D2E) is intentionally NOT in the palette — that's
+ * reserved for the route line and the user's own "me" marker.
+ */
+const RUNNER_PALETTE = [
+  "#5B8CFF", "#00E07A", "#FFB020", "#B57BFF",
+  "#36CFD1", "#FF7AB6", "#7CC4FF", "#FFD166",
+];
+
+/** Deterministic palette color for a runner, keyed by their user id. */
+export function runnerColor(uid: string): string {
+  let h = 0;
+  for (let i = 0; i < uid.length; i++) h = (h * 31 + uid.charCodeAt(i)) >>> 0;
+  return RUNNER_PALETTE[h % RUNNER_PALETTE.length];
+}
+
 export interface FauxMapProps {
   /** Planned-route path (drawn dashed under the recorded track). */
   routeD?: string;

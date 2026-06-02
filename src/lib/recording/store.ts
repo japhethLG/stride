@@ -221,6 +221,32 @@ function maybeLiveWrite(routeId: string | null, p: GeoPoint): void {
   if (liveWriter) liveWriter(routeId, p);
 }
 
+// --- elapsed-time ticker ---------------------------------------------------
+// The timer must advance every second even when no GPS fix arrives (a stationary
+// runner still sees the clock move). Stats' durationMs is otherwise only
+// recomputed inside addPoint, so without this the timer freezes between fixes.
+let tickTimer: ReturnType<typeof setInterval> | null = null;
+function stopDurationTick(): void {
+  if (tickTimer) {
+    clearInterval(tickTimer);
+    tickTimer = null;
+  }
+}
+function startDurationTick(): void {
+  stopDurationTick();
+  tickTimer = setInterval(() => {
+    const s = useRecordingStore.getState();
+    if (s.status !== "recording") {
+      stopDurationTick();
+      return;
+    }
+    const durationMs = activeDurationMs(s);
+    const paceSPerKm =
+      s.stats.distanceM > 0 ? durationMs / 1000 / (s.stats.distanceM / 1000) : null;
+    useRecordingStore.setState({ stats: { ...s.stats, durationMs, paceSPerKm } });
+  }, 1000);
+}
+
 // --- network-submit injection (set by the useRecordingSubmit bridge) -------
 let submitActivity: SubmitActivity | null = null;
 export function setSubmitActivity(fn: SubmitActivity | null): void {
@@ -271,21 +297,35 @@ export const useRecordingStore = create<RecordingState>((set, get) => ({
       get().addPoint(p);
     });
 
+    // Begin the RTDB live session CONCURRENTLY with GPS acquisition (route runs
+    // only; free runs skip it). Starting it here — rather than after the first
+    // fix arrives — is what lets positions publish from the very first fix
+    // instead of being dropped while the session is still coming up. Once it's
+    // live, seed it with the latest fix in case one already arrived during
+    // acquisition. Best-effort; never blocks recording.
+    const routeId = opts?.routeId ?? null;
+    if (routeId && liveController) {
+      void liveController
+        .start(routeId, activityId)
+        .then(async (throttle) => {
+          if (throttle && throttle > 0) liveThrottleMs = throttle;
+          // Seed an initial live position so the runner appears immediately (and
+          // the heartbeat has something to re-publish). Prefer the latest recorded
+          // fix; if none yet (stationary / watchPosition hasn't emitted), fall back
+          // to a one-shot getCurrentPosition, which returns even when standing still.
+          let seed: GeoPoint | null = get().points[get().points.length - 1] ?? null;
+          if (!seed) seed = await location.getCurrentPosition();
+          if (seed && get().routeId === routeId) liveController?.write(seed);
+        })
+        .catch(() => {
+          /* live is best-effort — never block recording on it */
+        });
+    }
+
     // Each filtered fix is buffered to IndexedDB inside `addPoint`.
     await location.start({ keepScreenOn: true, maxAccuracyM: MAX_ACCURACY_M });
     set({ status: "recording" });
-
-    // Begin the RTDB live session (route runs only; free runs skip it). The
-    // bridge no-ops when Firebase is unconfigured or there's no routeId.
-    const routeId = opts?.routeId ?? null;
-    if (routeId && liveController) {
-      try {
-        const throttle = await liveController.start(routeId, activityId);
-        if (throttle && throttle > 0) liveThrottleMs = throttle;
-      } catch {
-        /* live is best-effort — never block recording on it */
-      }
-    }
+    startDurationTick();
   },
 
   addPoint(p) {
@@ -318,6 +358,7 @@ export const useRecordingStore = create<RecordingState>((set, get) => ({
     if (state.status !== "recording") return;
     getAdapters().location.pause();
     liveController?.setState("paused");
+    stopDurationTick();
     set({
       status: "paused",
       accumulatedMs: activeDurationMs(state),
@@ -331,6 +372,7 @@ export const useRecordingStore = create<RecordingState>((set, get) => ({
     getAdapters().location.resume();
     liveController?.setState("running");
     set({ status: "recording", segmentStartedAt: Date.now() });
+    startDurationTick();
   },
 
   async stop() {
@@ -339,6 +381,7 @@ export const useRecordingStore = create<RecordingState>((set, get) => ({
     const { activityId, points, routeId, title, type } = state;
     set({ status: "saving" });
 
+    stopDurationTick();
     unsubscribePosition?.();
     unsubscribePosition = null;
     await location.stop();
@@ -385,6 +428,7 @@ export const useRecordingStore = create<RecordingState>((set, get) => ({
   },
 
   reset() {
+    stopDurationTick();
     unsubscribePosition?.();
     unsubscribePosition = null;
     liveController?.stop();

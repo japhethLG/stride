@@ -16,7 +16,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { Avatar, Btn, IconBtn, Row, Spinner, Tag } from "@/components/primitives";
-import { StatusPill, Empty, Metric } from "@/components/chrome";
+import { StatusPill, Empty, Metric, runnerColor } from "@/components/chrome";
 import { MapView } from "@/components/map/MapView";
 import { useRoute } from "@/lib/api/routes";
 import { useLiveSession, useLiveParticipants, useLiveRunners } from "@/lib/api/live";
@@ -73,7 +73,7 @@ export function RouteLivePage() {
   const onlineCount = runners.filter((r) => r.online).length;
   const liveEnabled = rtdb.enabled || participantsQ.data?.enabled === true;
 
-  // Runner markers — empty until CP6 (no RTDB positions).
+  // Runner markers — color-matched to the roster so each runner is identifiable.
   const runnerMarkers = runners
     .filter((r) => typeof r.lat === "number" && typeof r.lng === "number")
     .map((r) => ({
@@ -81,6 +81,7 @@ export function RouteLivePage() {
       lat: r.lat as number,
       type: "runner" as const,
       label: (r.displayName ?? "Runner").split(" ")[0],
+      color: runnerColor(r.userId),
       dim: !r.online,
     }));
 
@@ -264,7 +265,14 @@ export function RouteLivePage() {
                     opacity: rn.online ? 1 : 0.55,
                   }}
                 >
-                  <div style={{ position: "relative" }}>
+                  <div
+                    style={{
+                      position: "relative",
+                      borderRadius: "50%",
+                      // colored ring matching this runner's map marker
+                      boxShadow: `0 0 0 2.5px ${runnerColor(rn.userId)}`,
+                    }}
+                  >
                     <Avatar name={name} src={rn.photoUrl ?? undefined} size={42} />
                     <span
                       style={{

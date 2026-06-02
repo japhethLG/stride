@@ -47,6 +47,25 @@ interface ActiveLive {
   connRef: string | null; // connections/<uid>/<connId>
   connWatch: (() => void) | null;
   seq: number;
+  throttleMs: number;
+  /** Last position published — re-sent by the heartbeat so standing/slow runners stay visible. */
+  lastPos: GeoPoint | null;
+  /** Heartbeat timer re-publishing lastPos (keeps presence fresh + the runner "online"). */
+  hb: ReturnType<typeof setInterval> | null;
+}
+
+/** Overwrite the live-position node with `p` and bump presence lastSeen. */
+function publish(a: ActiveLive, p: GeoPoint): void {
+  a.seq += 1;
+  void set(ref(a.db, a.selfRef), {
+    lat: p.lat,
+    lng: p.lng,
+    ts: p.timestamp,
+    seq: a.seq,
+    ...(p.altitude != null ? { ele: p.altitude } : {}),
+    ...(p.speed != null ? { speed: p.speed } : {}),
+  });
+  void update(ref(a.db, a.presenceRef), { lastSeen: serverTimestamp() });
 }
 
 let active: ActiveLive | null = null;
@@ -83,6 +102,9 @@ export async function startLive(
     connRef,
     connWatch: null,
     seq: 0,
+    throttleMs: paths.throttleMs > 0 ? paths.throttleMs : 2000,
+    lastPos: null,
+    hb: null,
   };
 
   // Presence: I'm running now.
@@ -109,26 +131,26 @@ export async function startLive(
     }
   });
 
+  // Heartbeat: re-publish the latest known position every throttle. Without this
+  // a runner who isn't moving (warming up, paused at a light) stops emitting
+  // positions, disappears from other runners' maps, and goes stale/offline.
+  a.hb = setInterval(() => {
+    if (active === a && a.lastPos) publish(a, a.lastPos);
+  }, a.throttleMs);
+
   return true;
 }
 
 /**
- * Overwrite the single live-position node + bump presence lastSeen. The caller
- * (recording store) is responsible for the ~throttleMs throttle.
+ * Overwrite the single live-position node + bump presence lastSeen, and remember
+ * it as `lastPos` so the heartbeat keeps re-publishing while the runner is still.
+ * The caller (recording store) applies the ~throttleMs throttle for fresh fixes;
+ * the heartbeat handles the stationary case.
  */
 export function writeLivePosition(p: GeoPoint): void {
   if (!active) return;
-  const { db, selfRef, presenceRef } = active;
-  active.seq += 1;
-  void set(ref(db, selfRef), {
-    lat: p.lat,
-    lng: p.lng,
-    ts: p.timestamp,
-    seq: active.seq,
-    ...(p.altitude != null ? { ele: p.altitude } : {}),
-    ...(p.speed != null ? { speed: p.speed } : {}),
-  });
-  void update(ref(db, presenceRef), { lastSeen: serverTimestamp() });
+  active.lastPos = p;
+  publish(active, p);
 }
 
 /** Reflect pause/resume in presence state. */
@@ -144,6 +166,7 @@ export async function stopLive(): Promise<void> {
   if (!a) return;
   active = null;
   const { db, selfRef, presenceRef, connRef } = a;
+  if (a.hb) clearInterval(a.hb);
   a.connWatch?.();
   try {
     // Cancel the onDisconnect hooks since we're cleaning up explicitly.

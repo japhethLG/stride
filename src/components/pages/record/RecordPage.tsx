@@ -20,7 +20,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { Btn, Icon, IconBtn, Spinner, Tag } from "@/components/primitives";
-import { StatusPill } from "@/components/chrome";
+import { StatusPill, runnerColor } from "@/components/chrome";
 import { BaseSheet } from "@/components/sheets/BaseSheet";
 import { MapView } from "@/components/map/MapView";
 import { useRoute } from "@/lib/api/routes";
@@ -148,6 +148,7 @@ export function RecordPage() {
       lat: p.lat as number,
       type: "runner" as const,
       label: (p.displayName ?? "Runner").split(" ")[0],
+      color: runnerColor(p.userId),
       dim: !p.online,
     })),
     // "me": the live track head while recording, else the device location.
@@ -242,6 +243,80 @@ export function RecordPage() {
           <Tag tone="accent" icon="route">
             {asText(route.name)}
           </Tag>
+        </div>
+      )}
+
+      {/* live-runners roster — who else is on this route right now (color-matched
+          to their map marker). Only on route runs; useLiveRunners is subscribed
+          whether or not we've started, so it shows pre-run too. */}
+      {routeId && (otherRunners.length > 0 || live) && (
+        <div
+          style={{
+            position: "absolute",
+            top: live ? 106 : 60,
+            right: 14,
+            zIndex: 9,
+            display: "flex",
+            flexDirection: "column",
+            alignItems: "flex-end",
+            gap: 6,
+            maxWidth: 168,
+          }}
+        >
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 6,
+              background: "rgba(0,0,0,.5)",
+              backdropFilter: "blur(8px)",
+              border: "1px solid var(--border)",
+              borderRadius: "var(--r-pill)",
+              padding: "5px 11px",
+              color: "#fff",
+              fontWeight: 700,
+              fontSize: 11.5,
+            }}
+          >
+            <Icon name="users" size={13} color={otherRunners.length ? "var(--live)" : "var(--text-3)"} />
+            {otherRunners.length > 0
+              ? `${otherRunners.length} running now`
+              : "You're the only one here"}
+          </div>
+          {otherRunners.map((p) => (
+            <div
+              key={p.userId}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 7,
+                background: "rgba(0,0,0,.5)",
+                backdropFilter: "blur(8px)",
+                border: "1px solid var(--border)",
+                borderRadius: "var(--r-pill)",
+                padding: "4px 10px 4px 8px",
+                color: "#fff",
+                fontWeight: 600,
+                fontSize: 12,
+                opacity: p.online ? 1 : 0.5,
+                maxWidth: "100%",
+              }}
+            >
+              <span
+                style={{
+                  width: 9,
+                  height: 9,
+                  borderRadius: "50%",
+                  background: runnerColor(p.userId),
+                  flexShrink: 0,
+                  boxShadow: "0 0 0 2px rgba(0,0,0,.35)",
+                }}
+              />
+              <span style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                {(p.displayName ?? "Runner").split(" ")[0]}
+              </span>
+            </div>
+          ))}
         </div>
       )}
 
